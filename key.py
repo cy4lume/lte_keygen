@@ -265,34 +265,55 @@ class SecurityManager:
             k_up_enc=k_up_enc, k_up_int=k_up_int
         )
 
-if __name__ == "__main__":
-    # sim = SimProfile(
-    #     imsi=b"001010000023448",
-    #     k=bytes.fromhex("ca7c55125829396d335bd8dbcdcde151"),
-    #     opc=bytes.fromhex("d93b00efeaf0bb4e77c060e641497b4d"),
-    # )
+def validate():
+    def compute_opc(k: bytes, op: bytes) -> bytes:
+        cipher = AES.new(k, AES.MODE_ECB)
+        encrypted_op = cipher.encrypt(op)
+        return bytes(x ^ y for x, y in zip(op, encrypted_op))
+    
+    op = bytes.fromhex("cdc202d5123e20f62b6d676ac72cb318")
+    k = bytes.fromhex("465b5ce8b199b49faa5f0a2ee238a6bc")
 
-    # session = SessionState(
-    #     rand=bytes.fromhex("26b82cb5d36e3d7905f46cabc93534a1"),
-    #     mcc=0xf001,
-    #     mnc=0xff01,
-    #     sqn=0x3e0,
-    #     nas_ul_cnt=0,
-    #     enc_alg_id=EEA.EEA2,
-    #     int_alg_id=EIA.EIA1,
-    # )
-
-    # mgr = SecurityManager(sim)
-    # keys = mgr.derive_all(session)
+    opc = compute_opc(k, op)
 
     sim = SimProfile(
         imsi=b"001010000023448",
-        k=bytes.fromhex("465b5ce8b199b49faa5f0a2ee238a6bc"),
-        opc=bytes.fromhex("cdc202d5123e20f62b6d676ac72cb318"),
+        k=k,
+        opc=opc
     )
 
     session = SessionState(
         rand=bytes.fromhex("23553cbe9637a89d218ae64dae47bf35"),
+        mcc=0xf001,
+        mnc=0xff01,
+        sqn=0x3e0,
+        nas_ul_cnt=0,
+        enc_alg_id=EEA.EEA2,
+        int_alg_id=EIA.EIA1,
+    )
+
+    mgr = SecurityManager(sim)
+    keys = mgr.derive_all(session)
+
+    print("\n")
+
+    assert keys.ck == bytes.fromhex("b40ba9a3c58b2a05bbf0d987b21bf8cb"), keys.ck.hex()
+    assert keys.ik == bytes.fromhex("f769bcd751044604127672711c6d3441")
+    assert keys.ak == bytes.fromhex("aa689c648370")
+
+
+
+if __name__ == "__main__":
+    validate()
+
+    sim = SimProfile(
+        imsi=b"001010000023448",
+        k=bytes.fromhex("ca7c55125829396d335bd8dbcdcde151"),
+        opc=bytes.fromhex("d93b00efeaf0bb4e77c060e641497b4d"),
+    )
+
+    session = SessionState(
+        rand=bytes.fromhex("26b82cb5d36e3d7905f46cabc93534a1"),
         mcc=0xf001,
         mnc=0xff01,
         sqn=0x3e0,

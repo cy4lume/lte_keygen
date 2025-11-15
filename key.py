@@ -191,13 +191,13 @@ class KeyDeriver:
     @staticmethod
     def security_generate_k_rrc(k_enb, ca, ia) -> tuple:
 
-        ad = bytes([AlgoType.NAS_ENC])
+        ad = bytes([AlgoType.RRC_ENC])
         ai = bytes([ca])
 
         k_rrc_enc = kdf_common(FC.ALGO_KEY, k_enb, ad, ai)
         print(f"k_rrc_enc: {k_rrc_enc.hex()}")
         
-        ad = bytes([AlgoType.NAS_INT])
+        ad = bytes([AlgoType.RRC_INT])
         ai = bytes([ia])
 
         k_rrc_int = kdf_common(FC.ALGO_KEY, k_enb, ad, ai)
@@ -266,14 +266,33 @@ class SecurityManager:
         )
 
 if __name__ == "__main__":
+    # sim = SimProfile(
+    #     imsi=b"001010000023448",
+    #     k=bytes.fromhex("ca7c55125829396d335bd8dbcdcde151"),
+    #     opc=bytes.fromhex("d93b00efeaf0bb4e77c060e641497b4d"),
+    # )
+
+    # session = SessionState(
+    #     rand=bytes.fromhex("26b82cb5d36e3d7905f46cabc93534a1"),
+    #     mcc=0xf001,
+    #     mnc=0xff01,
+    #     sqn=0x3e0,
+    #     nas_ul_cnt=0,
+    #     enc_alg_id=EEA.EEA2,
+    #     int_alg_id=EIA.EIA1,
+    # )
+
+    # mgr = SecurityManager(sim)
+    # keys = mgr.derive_all(session)
+
     sim = SimProfile(
         imsi=b"001010000023448",
-        k=bytes.fromhex("ca7c55125829396d335bd8dbcdcde151"),
-        opc=bytes.fromhex("d93b00efeaf0bb4e77c060e641497b4d"),
+        k=bytes.fromhex("465b5ce8b199b49faa5f0a2ee238a6bc"),
+        opc=bytes.fromhex("cdc202d5123e20f62b6d676ac72cb318"),
     )
 
     session = SessionState(
-        rand=bytes.fromhex("26b82cb5d36e3d7905f46cabc93534a1"),
+        rand=bytes.fromhex("23553cbe9637a89d218ae64dae47bf35"),
         mcc=0xf001,
         mnc=0xff01,
         sqn=0x3e0,

@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from enum import IntEnum, unique
 from Crypto.Cipher import AES
 
+### some constants here
 @unique
 class FC(IntEnum):
     K_ASME     = 0x10 # FC_EPS_K_ASME_DERIVATION
@@ -50,6 +51,7 @@ class EIA(IntEnum): # integrity algorithm id for nas/rrc/up
     EIA2 = 2 # AES-CMAC
     EIA3 = 3 # ZUC
 
+### some data structures for key derivation here
 @dataclass(frozen=True)
 class SimProfile:
     imsi: bytes
@@ -67,6 +69,7 @@ class SessionState:
         self.enc_alg_id = enc_alg_id
         self.int_alg_id = int_alg_id
 
+### key box
 @dataclass(frozen=True)
 class DerivedKeys:
     ck: bytes = b""
@@ -77,14 +80,20 @@ class DerivedKeys:
     k_nas_enc: bytes = b""
     k_nas_int: bytes = b""
     k_enb: bytes = b""
+    k_rrc_enc: bytes = b""
+    k_rrc_int: bytes = b""
+    k_up_enc: bytes = b""
+    k_up_int: bytes = b""
 
+
+### Milenage algorithm here
 class Milenage:
     def __init__(self, k, opc):
         self.k = k
         self.opc = opc
         self.cipher = AES.new(k, AES.MODE_ECB)
 
-    def f2345(self, rand):
+    def f2345(self, rand:bytes) -> tuple:
         opc = self.opc
         cipher = self.cipher
 
@@ -124,11 +133,11 @@ class Milenage:
 
         return (ck, ik, ak, res)
 
-
+### Key deriver class here
 class KeyDeriver:
 
     @staticmethod
-    def security_generate_k_asme(ck, ik, ak_xor_sqn, mcc, mnc):
+    def security_generate_k_asme(ck, ik, ak_xor_sqn, mcc, mnc) -> bytes:
         """ck, ik, mcc, mnc -> k_asme"""
         key = ck + ik
 
@@ -148,7 +157,7 @@ class KeyDeriver:
         return k_asme
     
     @staticmethod
-    def security_generate_k_nas(k_asme, ca, ia):
+    def security_generate_k_nas(k_asme, ca, ia) -> tuple:
         key = k_asme
         ad = bytes([AlgoType.NAS_ENC])
         ai = bytes([ca])
@@ -165,7 +174,7 @@ class KeyDeriver:
         return (k_nas_enc, k_nas_int)
     
     @staticmethod
-    def security_generate_k_enb(k_asme, nas_count):
+    def security_generate_k_enb(k_asme, nas_count) -> bytes:
         key = k_asme
         nc = bytearray(4)
         
@@ -179,7 +188,42 @@ class KeyDeriver:
 
         return k_enb
 
-    
+    @staticmethod
+    def security_generate_k_rrc(k_enb, ca, ia) -> tuple:
+
+        ad = bytes([AlgoType.NAS_ENC])
+        ai = bytes([ca])
+
+        k_rrc_enc = kdf_common(FC.ALGO_KEY, k_enb, ad, ai)
+        print(f"k_rrc_enc: {k_rrc_enc.hex()}")
+        
+        ad = bytes([AlgoType.NAS_INT])
+        ai = bytes([ia])
+
+        k_rrc_int = kdf_common(FC.ALGO_KEY, k_enb, ad, ai)
+        print(f"k_rrc_int: {k_rrc_int.hex()}")
+
+        return (k_rrc_enc, k_rrc_int)
+
+    @staticmethod
+    def security_generate_k_up(k_enb, ca, ia) -> tuple:
+        ad = bytes([AlgoType.UP_ENC])
+        ai = bytes([ca])
+
+        k_up_enc = kdf_common(FC.ALGO_KEY, k_enb, ad, ai)
+        print(f"k_up_enc: {k_up_enc.hex()}")
+
+        ad = bytes([AlgoType.UP_INT])
+        ai = bytes([ia])
+
+        k_up_int = kdf_common(FC.ALGO_KEY, k_enb, ad, ai)
+        print(f"k_up_int: {k_up_int.hex()}")
+
+        return (k_up_enc, k_up_int)
+
+
+
+### common key derivation function
 def kdf_common(fc: int, key: bytes, *params: bytes, out_len: int = 32) -> bytes:
     """
     Generic 3GPP KDF:
@@ -195,6 +239,8 @@ def kdf_common(fc: int, key: bytes, *params: bytes, out_len: int = 32) -> bytes:
         s += p + len(p).to_bytes(2, "big")
     return hmac.new(key, s, hashlib.sha256).digest()[:out_len]
 
+
+### State info manager -> derive all key
 class SecurityManager:
     def __init__(self, sim:SimProfile):
         self.sim = sim
@@ -204,16 +250,19 @@ class SecurityManager:
         ck, ik, ak, res = self.milenage.f2345(session.rand)
         ak_xor_sqn = bytes(x ^ y for x, y in zip(ak, session.sqn))
 
-
         k_asme = KeyDeriver.security_generate_k_asme(
             ck, ik, ak_xor_sqn, session.mcc, session.mnc
         )
         k_nas_enc, k_nas_int = KeyDeriver.security_generate_k_nas(k_asme, session.enc_alg_id, session.int_alg_id)
         k_enb = KeyDeriver.security_generate_k_enb(k_asme, session.nas_ul_cnt)
+        k_rrc_enc, k_rrc_int = KeyDeriver.security_generate_k_rrc(k_enb, session.enc_alg_id, session.int_alg_id)
+        k_up_enc, k_up_int = KeyDeriver.security_generate_k_up(k_enb, session.enc_alg_id, session.int_alg_id)
 
         return DerivedKeys(
             ck=ck, ik=ik, ak=ak, res=res,
-            k_asme=k_asme, k_nas_enc=k_nas_enc, k_nas_int=k_nas_int, k_enb=k_enb
+            k_asme=k_asme, k_nas_enc=k_nas_enc, k_nas_int=k_nas_int, k_enb=k_enb,
+            k_rrc_enc=k_rrc_enc, k_rrc_int=k_rrc_int,
+            k_up_enc=k_up_enc, k_up_int=k_up_int
         )
 
 if __name__ == "__main__":

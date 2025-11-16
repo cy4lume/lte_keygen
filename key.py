@@ -301,7 +301,58 @@ def validate():
     assert keys.ik == bytes.fromhex("f769bcd751044604127672711c6d3441")
     assert keys.ak == bytes.fromhex("aa689c648370")
 
+def zero_tailing_bits(data: bytearray, bit_len: int) -> None:
+    total_bytes = (bit_len + 7) // 8
+    if bit_len % 8 == 0:
+        return
 
+    excess_bits = total_bytes * 8 - bit_len
+
+    last_idx = total_bytes - 1
+    mask = 0xFF & (0xFF << excess_bits)
+    data[last_idx] &= mask
+
+
+def liblte_security_encryption_eea2(
+    key: bytes,
+    count: int,
+    bearer: int,
+    direction: int, # 0: uplink, 1: downlink
+    msg: bytes,
+    msg_len_bits: int,
+) -> bytes:
+    if len(key) != 16:
+        raise ValueError("EEA2 uses 128-bit (16-byte) keys")
+
+    if msg is None or len(msg) == 0:
+        return b""
+
+    nbytes = (msg_len_bits + 7) // 8
+    if len(msg) < nbytes:
+        raise ValueError("msg is too short for msg_len_bits")
+
+    msg = msg[:nbytes]
+    
+    nonce_cnt = bytearray(16)
+    nonce_cnt[0] = (count >> 24) & 0xFF
+    nonce_cnt[1] = (count >> 16) & 0xFF
+    nonce_cnt[2] = (count >> 8) & 0xFF
+    nonce_cnt[3] = count & 0xFF
+    nonce_cnt[4] = ((bearer & 0x1F) << 3) | ((direction & 0x01) << 2)
+
+    cipher = AES.new(
+        key,
+        AES.MODE_CTR,
+        nonce=b"",
+        initial_value=int.from_bytes(nonce_cnt, "big"),
+    )
+
+    keystream_xored = cipher.encrypt(msg)
+
+    out = bytearray(keystream_xored)
+    zero_tailing_bits(out, msg_len_bits)
+
+    return bytes(out)
 
 if __name__ == "__main__":
     validate()
@@ -324,3 +375,8 @@ if __name__ == "__main__":
 
     mgr = SecurityManager(sim)
     keys = mgr.derive_all(session)
+
+    ## nas message decryption test
+    msg = bytes.fromhex("47f20ce0e2004dad")
+    a =  liblte_security_encryption_eea2(keys.k_nas_enc[16:], msg[5], 0, 0, msg[6:], (len(msg)-6)*8)
+    assert a == b"\x07\x5e"

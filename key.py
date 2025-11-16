@@ -376,7 +376,12 @@ if __name__ == "__main__":
     mgr = SecurityManager(sim)
     keys = mgr.derive_all(session)
 
-    ## nas message decryption test
+    ## nas message decryption test 1
     msg = bytes.fromhex("47f20ce0e2004dad")
     a =  liblte_security_encryption_eea2(keys.k_nas_enc[16:], msg[5], 0, 0, msg[6:], (len(msg)-6)*8)
     assert a == b"\x07\x5e"
+
+    ## nas message decryption test 2
+    msg = bytes.fromhex("272eb7b52c01f5e1181916151edfb95e2da462d6523af2d6618a5618df7d04ab")
+    a = liblte_security_encryption_eea2(keys.k_nas_enc[16:], msg[5], 0, 0, msg[6:], (len(msg)-6)*8)
+    assert a == bytes.fromhex("0201da28070673727361706e2724808021100100001081060000")

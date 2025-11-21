@@ -57,17 +57,34 @@ class SimProfile:
     imsi: bytes
     k: bytes      # 16B
     opc: bytes    # 16B
-    amf: bytes = b"\x90\x01" # idk??
+    amf: bytes
 
 class SessionState:
-    def __init__(self, rand, mcc, mnc, sqn, nas_ul_cnt, enc_alg_id, int_alg_id):
+    def __init__(self, rand, mcc, mnc, sqn, sqn_xor_ak, nas_ul_cnt, enc_alg_id, int_alg_id):
+
+        if (sqn is None) == (sqn_xor_ak is None):
+            raise ValueError("Exactly one of sqn or sqn_xor_ak must be provided")
+        
         self.rand = rand
         self.mcc = mcc
         self.mnc = mnc
-        self.sqn = sqn.to_bytes(6, "big")
         self.nas_ul_cnt = nas_ul_cnt
         self.enc_alg_id = enc_alg_id
         self.int_alg_id = int_alg_id
+
+        self.sqn = None
+        self.sqn_xor_ak = None
+
+        if sqn != None:
+            if isinstance(sqn, int):
+                self.sqn = sqn.to_bytes(6, "big")
+            else:
+                self.sqn = sqn
+        else:
+            if isinstance(sqn_xor_ak, int):
+                self.sqn_xor_ak = sqn_xor_ak.to_bytes(6, "big")
+            else:
+                self.sqn_xor_ak = sqn_xor_ak
 
 ### key box
 @dataclass(frozen=True)
@@ -178,10 +195,10 @@ class KeyDeriver:
         key = k_asme
         nc = bytearray(4)
         
-        nc[0] = (nas_count >> 24) & 0xFF;
-        nc[1] = (nas_count >> 16) & 0xFF;
-        nc[2] = (nas_count >> 8) & 0xFF;
-        nc[3] = nas_count & 0xFF;
+        nc[0] = (nas_count >> 24) & 0xFF
+        nc[1] = (nas_count >> 16) & 0xFF
+        nc[2] = (nas_count >> 8) & 0xFF
+        nc[3] = nas_count & 0xFF
     
         k_enb = kdf_common(FC.K_ENB, key, nc)
         print(f"k_enb: {k_enb.hex()}")
@@ -248,7 +265,12 @@ class SecurityManager:
 
     def derive_all(self, session:SessionState):
         ck, ik, ak, res = self.milenage.f2345(session.rand)
-        ak_xor_sqn = bytes(x ^ y for x, y in zip(ak, session.sqn))
+        ak_xor_sqn = None
+
+        if (session.sqn_xor_ak != None):
+            ak_xor_sqn = session.sqn_xor_ak
+        else:
+            ak_xor_sqn = bytes(x ^ y for x, y in zip(ak, session.sqn))
 
         k_asme = KeyDeriver.security_generate_k_asme(
             ck, ik, ak_xor_sqn, session.mcc, session.mnc
@@ -279,7 +301,8 @@ def validate():
     sim = SimProfile(
         imsi=b"001010000023448",
         k=k,
-        opc=opc
+        opc=opc,
+        amf="\x90\x01"
     )
 
     session = SessionState(
@@ -287,6 +310,7 @@ def validate():
         mcc=0xf001,
         mnc=0xff01,
         sqn=0x3e0,
+        sqn_xor_ak = None,
         nas_ul_cnt=0,
         enc_alg_id=EEA.EEA2,
         int_alg_id=EIA.EIA1,
@@ -358,16 +382,18 @@ if __name__ == "__main__":
     validate()
 
     sim = SimProfile(
-        imsi=b"001010000023448",
-        k=bytes.fromhex("ca7c55125829396d335bd8dbcdcde151"),
-        opc=bytes.fromhex("d93b00efeaf0bb4e77c060e641497b4d"),
+        imsi=b"001010123456780",
+        k=bytes.fromhex("00112233445566778899aabbccddeeff"),
+        opc=bytes.fromhex("63BFA50EE6523365FF14C1F45F88737D"),
+        amf=b"\x90\x01"
     )
 
     session = SessionState(
-        rand=bytes.fromhex("26b82cb5d36e3d7905f46cabc93534a1"),
+        rand=bytes.fromhex("0654abbf09fa09d12c1e8717573550f4"),
         mcc=0xf001,
         mnc=0xff01,
-        sqn=0x3e0,
+        sqn=None,
+        sqn_xor_ak=bytes.fromhex("b1f6e818832c"),
         nas_ul_cnt=0,
         enc_alg_id=EEA.EEA2,
         int_alg_id=EIA.EIA1,
@@ -375,13 +401,3 @@ if __name__ == "__main__":
 
     mgr = SecurityManager(sim)
     keys = mgr.derive_all(session)
-
-    ## nas message decryption test 1
-    msg = bytes.fromhex("47f20ce0e2004dad")
-    a =  liblte_security_encryption_eea2(keys.k_nas_enc[16:], msg[5], 0, 0, msg[6:], (len(msg)-6)*8)
-    assert a == b"\x07\x5e"
-
-    ## nas message decryption test 2
-    msg = bytes.fromhex("272eb7b52c01f5e1181916151edfb95e2da462d6523af2d6618a5618df7d04ab")
-    a = liblte_security_encryption_eea2(keys.k_nas_enc[16:], msg[5], 0, 0, msg[6:], (len(msg)-6)*8)
-    assert a == bytes.fromhex("0201da28070673727361706e2724808021100100001081060000")

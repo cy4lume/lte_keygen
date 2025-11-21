@@ -5,6 +5,10 @@ from enum import unique, StrEnum, Enum
 
 import pyshark
 
+import key
+from Util import ColorPrinter
+
+
 @unique
 class Protocol(StrEnum):
 	MAC_LTE = 'mac-lte'
@@ -12,73 +16,98 @@ class Protocol(StrEnum):
 	NAS_EPS = 'nas-eps'
 	RLC_LTE = 'rlc-lte'
 
-@unique
-class Color(StrEnum):
-	END = '\x1b[0m'
-	RED = '\x1b[31m'
-	GREEN = '\x1b[32m'
-	YELLOW = '\x1b[33m'
-	BLUE = '\x1b[34m'
-	MAGENTA = '\x1b[35m'
-	CYAN = '\x1b[36m'
-	WHITE = '\x1b[37m'
-	DEFAULT = '\x1b[39m'
-colors = [Color.RED, Color.GREEN, Color.YELLOW, Color.BLUE, Color.MAGENTA, Color.CYAN, Color.WHITE]
 
 class UE:
 
 	def __init__(self, rnti):
 		self.rnti = rnti
-		self.temp = []
+		self.printer = ColorPrinter()
+
+		self.rrc_enc = None
+		self.rrc_int = None
+
 
 	def parse(self, frame):
 		if not self.rnti == 61:
 			return
+
+		printer = self.printer
 
 		#Funky packets:
 		# 13053
 		# 28286
 
 		number = int(frame.frame_info.number)
-		protocol = str(frame.frame_info.protocols).removeprefix('user_dlt:mac-lte-framed')
+		mac_lte = frame['mac-lte']
+		fields = set(mac_lte.field_names)
 
 
-		if "nas-eps" in protocol or True:
-			mac_lte = frame['mac-lte']
+		if 'gsm_a_dtap_autn' in fields:
+			printer.print(number, self.rnti, "Auth Request")
+			printer.skip(3)
 
-			fields = [
-				'lte_rrc_dl_dcch_message_element',
-				'lte_rrc_dlinformationtransfer_element',
+			autn = getattr(mac_lte, 'gsm_a_dtap_autn')
+			self.autn = autn.split(':')
+
+			rand = getattr(mac_lte, 'gsm_a_dtap_rand')
+			self.rand = rand.split(':')
+
+			printer.print(
+				f'AUTN: {''.join(self.autn)}',
+				f'RAND: {''.join(self.rand)}'
+			)
+
+		elif 'lte_rrc_cipheringalgorithm' in fields:
+			printer.print(number, self.rnti, "Security Mode command")
+			printer.skip(3)
+
+			rrc_enc = getattr(mac_lte, 'lte_rrc_cipheringalgorithm')
+			self.rrc_enc = key.EEA(int(rrc_enc))
+
+			rrc_int = getattr(mac_lte, 'lte_rrc_integrityprotalgorithm')
+			self.rrc_int = key.EIA(int(rrc_int))
+
+			printer.print(f'cipher: {self.rrc_enc.name}', f'integrity: {self.rrc_int.name}')
+
+		elif 'nas_eps_ciphered_msg' in fields:
+			printer.print(number, self.rnti)
+
+			querry = [
 				'pdcp_lte_seq_num',
-				'gsm_a_dtap_rand',
-				'gsm_a_dtap_autn',
 			]
 
-			print(number, end=' ')
+			printer.print('Ciphered')
 
-			for (i, field) in enumerate(fields):
-				if field in mac_lte.field_names:
-					print(colors[i], getattr(mac_lte, field), end=' ')
+			for (i, field) in enumerate(querry):
+				if field in fields:
+					printer.print(getattr(mac_lte, field))
+				else:
+					printer.skip(1)
 
-			print(Color.DEFAULT)
+			printer.skip(5)
+			printer.print([s for s in fields if 'nas_eps' in s])
 
-#		if protocol.startswith(':mac-lte:rlc-lte'):
-#			protocol = protocol.removeprefix(':mac-lte:rlc-lte')
-#
-#			if protocol.startswith(':pdcp-lte:lte_rrc'):
-#				print(number, 'asd', protocol)
-#			else:
-#				print(number, 'Other')
-#
-#			pass
+		elif 'nas_eps_security_header_type' in fields:
+			printer.print(number, self.rnti)
 
 
-		if protocol not in self.temp:
-			print(number, f'\x1b[3m{Color.CYAN}{protocol}{Color.END}')
-			self.temp.append(protocol)
+			querry = [
+				'pdcp_lte_seq_num',
+			]
 
+			printer.print('OTHER')
 
-		#print(frame.frame_info.number, frame.frame_info.protocols)
+			for (i, field) in enumerate(querry):
+				if field in fields:
+					printer.print(getattr(mac_lte, field))
+				else:
+					printer.skip(1)
+
+			printer.skip(5)
+			printer.print([s for s in fields if 'nas_eps' in s])
+
+		printer.flush()
+
 
 	pass
 
@@ -130,10 +159,7 @@ if __name__ == '__main__':
 		display_filter = '_ws.col.protocol != "LTE RRC DL_SCH"'
 		cap = pyshark.FileCapture(args.filename, eventloop=loop, display_filter=display_filter)
 
-		(autn, rand) = extract(cap)
-
-		print("AUTN", "".join(autn))
-		print("RAND", "".join(rand))
+		extract(cap)
 
 
 	except FileNotFoundError:

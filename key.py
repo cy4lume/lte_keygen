@@ -62,8 +62,8 @@ class SimProfile:
 class SessionState:
     def __init__(self, rand, mcc, mnc, sqn, sqn_xor_ak, nas_ul_cnt, enc_alg_id, int_alg_id):
 
-        if (sqn is None) == (sqn_xor_ak is None):
-            raise ValueError("Exactly one of sqn or sqn_xor_ak must be provided")
+#        if (sqn is None) == (sqn_xor_ak is None):
+#            raise ValueError("Exactly one of sqn or sqn_xor_ak must be provided")
         
         self.rand = rand
         self.mcc = mcc
@@ -144,9 +144,9 @@ class Milenage:
 
         ik = out[:16]
 
-        print(f"User CK: {ck.hex()}")
-        print(f"User IK: {ik.hex()}")
-        print(f"User AK: {ak.hex()}")
+        #print(f"User CK: {ck.hex()}")
+        #print(f"User IK: {ik.hex()}")
+        #print(f"User AK: {ak.hex()}")
 
         return (ck, ik, ak, res)
 
@@ -170,7 +170,7 @@ class KeyDeriver:
         
         k_asme = kdf_common(FC.K_ASME, key, sn, ak_xor_sqn)
 
-        print(f"k_asme: {k_asme.hex()}")
+        #print(f"k_asme: {k_asme.hex()}")
         return k_asme
     
     @staticmethod
@@ -180,13 +180,13 @@ class KeyDeriver:
         ai = bytes([ca])
 
         k_nas_enc = kdf_common(FC.ALGO_KEY, key, ad, ai)
-        print(f"k_nas_enc: {k_nas_enc.hex()}")
+        #print(f"k_nas_enc: {k_nas_enc.hex()}")
 
         ad = bytes([AlgoType.NAS_INT])
         ai = bytes([ia])
 
         k_nas_int = kdf_common(FC.ALGO_KEY, key, ad, ai)
-        print(f"k_nas_int: {k_nas_int.hex()}")
+        #print(f"k_nas_int: {k_nas_int.hex()}")
 
         return (k_nas_enc, k_nas_int)
     
@@ -201,7 +201,7 @@ class KeyDeriver:
         nc[3] = nas_count & 0xFF
     
         k_enb = kdf_common(FC.K_ENB, key, nc)
-        print(f"k_enb: {k_enb.hex()}")
+        #print(f"k_enb: {k_enb.hex()}")
 
         return k_enb
 
@@ -212,13 +212,13 @@ class KeyDeriver:
         ai = bytes([ca])
 
         k_rrc_enc = kdf_common(FC.ALGO_KEY, k_enb, ad, ai)
-        print(f"k_rrc_enc: {k_rrc_enc.hex()}")
+        #print(f"k_rrc_enc: {k_rrc_enc.hex()}")
         
         ad = bytes([AlgoType.RRC_INT])
         ai = bytes([ia])
 
         k_rrc_int = kdf_common(FC.ALGO_KEY, k_enb, ad, ai)
-        print(f"k_rrc_int: {k_rrc_int.hex()}")
+        #print(f"k_rrc_int: {k_rrc_int.hex()}")
 
         return (k_rrc_enc, k_rrc_int)
 
@@ -228,13 +228,13 @@ class KeyDeriver:
         ai = bytes([ca])
 
         k_up_enc = kdf_common(FC.ALGO_KEY, k_enb, ad, ai)
-        print(f"k_up_enc: {k_up_enc.hex()}")
+        #print(f"k_up_enc: {k_up_enc.hex()}")
 
         ad = bytes([AlgoType.UP_INT])
         ai = bytes([ia])
 
         k_up_int = kdf_common(FC.ALGO_KEY, k_enb, ad, ai)
-        print(f"k_up_int: {k_up_int.hex()}")
+        #print(f"k_up_int: {k_up_int.hex()}")
 
         return (k_up_enc, k_up_int)
 
@@ -319,7 +319,7 @@ def validate():
     mgr = SecurityManager(sim)
     keys = mgr.derive_all(session)
 
-    print("\n")
+    #print("\n")
 
     assert keys.ck == bytes.fromhex("b40ba9a3c58b2a05bbf0d987b21bf8cb"), keys.ck.hex()
     assert keys.ik == bytes.fromhex("f769bcd751044604127672711c6d3441")

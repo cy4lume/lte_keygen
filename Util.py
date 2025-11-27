@@ -1,6 +1,7 @@
 from enum import StrEnum, unique
 
 
+# https://gist.github.com/fnky/458719343aabd01cfb17a3a4f7296797
 @unique
 class Color(StrEnum):
 	END = '\x1b[0m'

@@ -1,12 +1,15 @@
 import argparse
 import asyncio
+import csv
 import os.path
 from enum import unique, StrEnum, Enum
+from typing import List, Tuple
+import tqdm
 
 import pyshark
 
-import key
 from Util import ColorPrinter
+from key import *
 
 
 @unique
@@ -19,19 +22,36 @@ class Protocol(StrEnum):
 
 class UE:
 
-	def __init__(self, rnti):
+	def __init__(self, rnti: int, credentials: List[SecurityManager]):
 		self.rnti = rnti
+		self.credentials = credentials
+		self.keys = None
+
 		self.printer = ColorPrinter()
 
-		self.rrc_enc = None
-		self.rrc_int = None
+		self.session = SessionState(
+			rand=None,
+			mcc=0,
+			mnc=0,
+			sqn=None,
+			sqn_xor_ak=None,
+			nas_ul_cnt=0,
+			enc_alg_id=None,
+			int_alg_id=None,
+		)
 
 
 	def parse(self, frame):
-		if not self.rnti == 61:
+		if self.rnti != 61:
 			return
 
 		printer = self.printer
+
+		def parse_hex(mac_lte, param):
+			return bytes.fromhex(''.join(getattr(mac_lte, param).split(':')))
+
+		def parse_int(mac_lte, param):
+			return int(getattr(mac_lte, param))
 
 		#Funky packets:
 		# 13053
@@ -41,63 +61,101 @@ class UE:
 		mac_lte = frame['mac-lte']
 		fields = set(mac_lte.field_names)
 
-
 		if 'gsm_a_dtap_autn' in fields:
 			printer.print(number, self.rnti, "Auth Request")
 			printer.skip(3)
 
-			autn = getattr(mac_lte, 'gsm_a_dtap_autn')
-			self.autn = autn.split(':')
-
-			rand = getattr(mac_lte, 'gsm_a_dtap_rand')
-			self.rand = rand.split(':')
+			self.session.autn = parse_hex(mac_lte, 'gsm_a_dtap_autn')
+			self.session.rand = parse_hex(mac_lte, 'gsm_a_dtap_rand')
+			self.session.sqn_xor_ak = parse_hex(mac_lte, 'gsm_a_dtap_autn_sqn_xor_ak')
 
 			printer.print(
-				f'AUTN: {''.join(self.autn)}',
-				f'RAND: {''.join(self.rand)}'
+				f'AUTN: {self.session.autn.hex()}',
+				f'RAND: {''.join(self.session.rand.hex())}',
+				f'sqn^Ak: {''.join(self.session.sqn_xor_ak.hex())}',
 			)
 
-		elif 'lte_rrc_cipheringalgorithm' in fields:
+
+		elif 'nas_eps_emm_toc' in fields:
 			printer.print(number, self.rnti, "Security Mode command")
 			printer.skip(3)
 
-			rrc_enc = getattr(mac_lte, 'lte_rrc_cipheringalgorithm')
-			self.rrc_enc = key.EEA(int(rrc_enc))
+			self.session.enc_alg_id = EEA(parse_int(mac_lte, 'nas_eps_emm_toc'))
+			self.session.int_alg_id = EIA(parse_int(mac_lte, 'nas_eps_emm_toi'))
 
-			rrc_int = getattr(mac_lte, 'lte_rrc_integrityprotalgorithm')
-			self.rrc_int = key.EIA(int(rrc_int))
+			printer.print(
+				f'cipher: {self.session.enc_alg_id.name}',
+				f'integrity: {self.session.int_alg_id.name}'
+			)
 
-			printer.print(f'cipher: {self.rrc_enc.name}', f'integrity: {self.rrc_int.name}')
+			printer.flush()
+			self.keys = [mgr.derive_all(self.session) for mgr in self.credentials]
 
-		elif 'nas_eps_ciphered_msg' in fields:
-			printer.print(number, self.rnti)
 
-			querry = [
-				'pdcp_lte_seq_num',
-			]
+		elif 'nas_eps_ciphered_msg' in fields:  #Ciphered message
+			printer.print(number, self.rnti, 'Ciphered')
+			seq = parse_int(mac_lte, 'nas_eps_seq_no')
+			printer.print(seq)
 
-			printer.print('Ciphered')
+			printer.skip(4)
 
-			for (i, field) in enumerate(querry):
-				if field in fields:
-					printer.print(getattr(mac_lte, field))
+			integrity = getattr(mac_lte, 'nas_eps_msg_auth_code')
+			cipher = parse_hex(mac_lte, 'nas_eps_ciphered_msg')
+
+			printer.print(f'integrity: {integrity}')
+			printer.flush()
+
+			for keys in self.keys:
+				if number != 2700:
+					continue
+
+				key = keys.k_nas_enc
+				print(key.hex())
+				key = key[int(len(key) / 2):]
+				print(f'K NAS enc:                      {key.hex()}')
+
+
+				ak = int.from_bytes(keys.ak)
+				print(f'count: {seq}')
+				print(f'   ak: {ak}')
+				count = seq ^ ak
+				print(f'COUNT: {count}')
+
+				# Set to False to enable brue search.
+				for seq in [seq] if False else tqdm.tqdm(range(2 ** 32)):
+					count = seq ^ ak
+
+					for direction in range(2 ** 1):
+						for bearer in range(2 ** 5):
+							try:
+								plain = liblte_security_encryption_eea2(
+									key,
+									count,
+									bearer,
+									direction,
+									cipher,
+									len(cipher) * 8
+								)
+								decoded = plain.decode('utf-8')
+
+								print('\t', plain.hex())
+								print('\t', decoded)
+
+								break
+							except UnicodeDecodeError:
+								pass
 				else:
-					printer.skip(1)
+					print("Could not decrypt message")
 
-			printer.skip(5)
-			printer.print([s for s in fields if 'nas_eps' in s])
 
 		elif 'nas_eps_security_header_type' in fields:
-			printer.print(number, self.rnti)
+			printer.print(number, self.rnti, 'OTHER')
 
-
-			querry = [
+			query = [
 				'pdcp_lte_seq_num',
 			]
 
-			printer.print('OTHER')
-
-			for (i, field) in enumerate(querry):
+			for (i, field) in enumerate(query):
 				if field in fields:
 					printer.print(getattr(mac_lte, field))
 				else:
@@ -111,7 +169,8 @@ class UE:
 
 	pass
 
-def extract(cap: pyshark.FileCapture):
+
+def extract(cap: pyshark.FileCapture, credentials: List[SecurityManager]):
 	ues = {}
 	for frame in cap:
 		rnti = int(frame["MAC-LTE"].rnti)
@@ -121,46 +180,41 @@ def extract(cap: pyshark.FileCapture):
 
 		if rnti not in ues:
 			print(f"New UE: {rnti}")
-			ues[rnti] = UE(rnti)
+			ues[rnti] = UE(rnti, credentials)
+
 		ues[rnti].parse(frame)
-
-
-		continue
-
-		try:
-			mac_lte = frame["MAC-LTE"]
-
-			if "gsm_a_dtap_autn" not in mac_lte.field_names:
-				continue
-			if "gsm_a_dtap_rand" not in mac_lte.field_names:
-				continue
-
-			autn = mac_lte.gsm_a_dtap_autn.split(":")
-			rand = mac_lte.gsm_a_dtap_rand.split(":")
-
-			return (autn, rand)
-
-		except Exception as e:
-			print("asd", e)
 
 
 if __name__ == '__main__':
 	parser = argparse.ArgumentParser(
 		prog="extract"
 	)
-	parser.add_argument("filename", help="The .pcap file to analyze")
+	parser.add_argument("input", help="The .pcap file to analyze")
+	parser.add_argument("credentials", help="The .csv file containing imsi,k,opc")
 	args = parser.parse_args()
 
+	loop = asyncio.SelectorEventLoop()  #TODO: This does not work on windows
+	asyncio.set_event_loop(loop)
 
-	try:
-		loop = asyncio.SelectorEventLoop() #TODO: This does not work on windows
-		asyncio.set_event_loop(loop)
+	credentials = []
+	with open(args.credentials, newline='') as f:
+		reader = csv.reader(f)
+		reader.__next__()
 
-		display_filter = '_ws.col.protocol != "LTE RRC DL_SCH"'
-		cap = pyshark.FileCapture(args.filename, eventloop=loop, display_filter=display_filter)
+		for row in reader:
+			imsi, k, opc = row
+			sim = SimProfile(
+				imsi=imsi,
+				k=bytes.fromhex(k),
+				opc=bytes.fromhex(opc),
+				amf=b"\x00\x00",
+			)
+			credentials.append(SecurityManager(sim))
 
-		extract(cap)
+	print(credentials)
 
+	#display_filter = '_ws.col.protocol != "LTE RRC DL_SCH"'
+	display_filter = '(_ws.col.protocol != "LTE RRC DL_SCH") && !(_ws.col.protocol == "MAC-LTE")'
+	cap = pyshark.FileCapture(args.input, eventloop=loop, display_filter=display_filter)
 
-	except FileNotFoundError:
-		print("Could not open .pcap file {args.filename}")
+	extract(cap, credentials)

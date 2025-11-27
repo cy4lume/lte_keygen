@@ -54,3 +54,12 @@ class ColorPrinter:
 		if (self.i > 0):
 			self.i = 0
 			print()
+
+
+def print_hex(bytes):
+	temp = bytes.hex(' ')
+	for i in range(0, len(temp), 4 * 3):
+		print(temp[i:i + 4 * 3], end='  ')
+		if int(i / (4 * 3) + 1) % 4 == 0:
+			print()
+	print()

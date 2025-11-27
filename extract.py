@@ -2,13 +2,14 @@ import argparse
 import asyncio
 import csv
 import os.path
+import sys
 from enum import unique, StrEnum, Enum
 from typing import List, Tuple
 import tqdm
 
 import pyshark
 
-from Util import ColorPrinter
+from Util import ColorPrinter, print_hex
 from key import *
 
 
@@ -106,14 +107,13 @@ class UE:
 			printer.flush()
 
 			for keys in self.keys:
-				if number != 2700:
+				if number != 2705:
 					continue
 
 				key = keys.k_nas_enc
 				print(key.hex())
 				key = key[int(len(key) / 2):]
 				print(f'K NAS enc:                      {key.hex()}')
-
 
 				ak = int.from_bytes(keys.ak)
 				print(f'count: {seq}')
@@ -122,13 +122,13 @@ class UE:
 				print(f'COUNT: {count}')
 
 				# Set to False to enable brue search.
-				for seq in [seq] if False else tqdm.tqdm(range(2 ** 32)):
+				for seq in [seq] if True else tqdm.tqdm(range(2 ** 32)):
 					count = seq ^ ak
 
 					for direction in range(2 ** 1):
 						for bearer in range(2 ** 5):
 							try:
-								plain = liblte_security_encryption_eea2(
+								decrypted_raw = liblte_security_encryption_eea2(
 									key,
 									count,
 									bearer,
@@ -136,13 +136,12 @@ class UE:
 									cipher,
 									len(cipher) * 8
 								)
-								decoded = plain.decode('utf-8')
 
-								print('\t', plain.hex())
-								print('\t', decoded)
+								decrypted = decode(decrypted_raw)
+								print(decrypted['mac-lte'].gsm_sms_sms_text)
 
 								break
-							except UnicodeDecodeError:
+							except AttributeError:
 								pass
 				else:
 					print("Could not decrypt message")
@@ -170,9 +169,52 @@ class UE:
 	pass
 
 
+def decode(raw: bytes) -> bytes:
+	#print_hex(raw)
+
+	out = bytearray()
+
+	# File Header
+	out += bytes.fromhex('d4 c3 b2 a1')  # Magic number
+	out += bytes.fromhex('02 00 04 00')  # Version
+	out += bytes.fromhex('00 00 00 00')  # 0
+	out += bytes.fromhex('00 00 00 00')  # 0
+	out += bytes.fromhex('FF FF 00 00')  # Snap Len
+	out += bytes.fromhex('93 00 00 00')  # IDK
+
+	# Packet Record
+	out += bytes.fromhex('be ef be ef')  # time
+	out += bytes.fromhex('be ef be ef')  # time
+	out += len(raw).to_bytes(4, "little")  # Capture Len
+	out += len(raw).to_bytes(4, 'little')  # Capture Len
+
+	out += raw
+
+	print_hex(out)
+	with open('temp.pcap', 'wb') as f:
+		f.write(out)
+
+	loop = asyncio.SelectorEventLoop()  #TODO: This does not work on windows
+	asyncio.set_event_loop(loop)
+
+	#c = pyshark.InMemCapture(eventloop=loop)
+	#c.set_debug(True)
+	#c.parse_packet(out)
+	c = pyshark.FileCapture('temp.pcap', eventloop=loop)
+
+	#print(c)
+	frame = c.next()
+	c.close()
+
+	return frame
+
 def extract(cap: pyshark.FileCapture, credentials: List[SecurityManager]):
 	ues = {}
-	for frame in cap:
+
+	frames = [frame for frame in cap]
+	cap.close()
+
+	for frame in frames:
 		rnti = int(frame["MAC-LTE"].rnti)
 
 		if rnti == 65535:
@@ -186,6 +228,14 @@ def extract(cap: pyshark.FileCapture, credentials: List[SecurityManager]):
 
 
 if __name__ == '__main__':
+	#((_ws.col.protocol != "LTE RRC DL_SCH") && !(_ws.col.protocol == "MAC-LTE")) && (mac-lte.rnti == 61)
+
+#	unenc = bytes.fromhex(
+#		'01010302003d030000040d5407010a000f000122361fa0020308016139bd318418483b1118c809000808240000000000b820440888888888000290898389222b18368bdaca767818e84d80ef00000000'
+#	)
+#	decode(unenc)
+#	exit(0)
+
 	parser = argparse.ArgumentParser(
 		prog="extract"
 	)

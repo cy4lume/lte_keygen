@@ -21,6 +21,13 @@ class Protocol(StrEnum):
 	RLC_LTE = 'rlc-lte'
 
 
+def parse_hex(mac_lte, param):
+	return bytes.fromhex(''.join(getattr(mac_lte, param).split(':')))
+
+
+def parse_int(mac_lte, param):
+	return int(getattr(mac_lte, param))
+
 class UE:
 
 	def __init__(self, rnti: int, credentials: List[SecurityManager]):
@@ -47,12 +54,6 @@ class UE:
 			return
 
 		printer = self.printer
-
-		def parse_hex(mac_lte, param):
-			return bytes.fromhex(''.join(getattr(mac_lte, param).split(':')))
-
-		def parse_int(mac_lte, param):
-			return int(getattr(mac_lte, param))
 
 		#Funky packets:
 		# 13053
@@ -98,16 +99,19 @@ class UE:
 			seq = parse_int(mac_lte, 'nas_eps_seq_no')
 			printer.print(seq)
 
-			printer.skip(4)
+			printer.print(parse_hex(mac_lte, 'dlsch_header').hex())
+			printer.print(parse_hex(mac_lte, 'rlc_lte_am_header').hex())
+			printer.skip(2)
 
 			integrity = getattr(mac_lte, 'nas_eps_msg_auth_code')
+			cipher = parse_hex(mac_lte, 'nas_eps_ciphered_msg')
 			cipher = parse_hex(mac_lte, 'nas_eps_ciphered_msg')
 
 			printer.print(f'integrity: {integrity}')
 			printer.flush()
 
 			for keys in self.keys:
-				if number != 2705:
+				if number != 2705 or True:
 					continue
 
 				key = keys.k_nas_enc
@@ -137,7 +141,7 @@ class UE:
 									len(cipher) * 8
 								)
 
-								decrypted = decode(decrypted_raw)
+								decrypted = decode(decrypted_raw, frame)
 								print(decrypted['mac-lte'].gsm_sms_sms_text)
 
 								break
@@ -169,44 +173,56 @@ class UE:
 	pass
 
 
-def decode(raw: bytes) -> bytes:
+def decode(info_nas: bytes, src_frame) -> bytes:
 	#print_hex(raw)
+	fromhex = bytes.fromhex
 
-	out = bytearray()
+	pcap = bytearray()
 
 	# File Header
-	out += bytes.fromhex('d4 c3 b2 a1')  # Magic number
-	out += bytes.fromhex('02 00 04 00')  # Version
-	out += bytes.fromhex('00 00 00 00')  # 0
-	out += bytes.fromhex('00 00 00 00')  # 0
-	out += bytes.fromhex('FF FF 00 00')  # Snap Len
-	out += bytes.fromhex('93 00 00 00')  # IDK
+	pcap += fromhex('d4 c3 b2 a1')  # Magic number
+	pcap += fromhex('02 00 04 00')  # Version
+	pcap += fromhex('00 00 00 00')  # 0
+	pcap += fromhex('00 00 00 00')  # 0
+	pcap += fromhex('FF FF 00 00')  # Snap Len
+	pcap += fromhex('93 00 00 00')  # IDK
+
+	#Frame header???
+	frame = bytearray()
+	frame += fromhex('01 01 03 02') #Magic numbers?
+	frame += fromhex('00 3d 03 00') #Magic numbers?
+	frame += fromhex('00 04 2a b4') #Magic numbers?
+	frame += fromhex('07 01 0a 00') #Magic numbers?
+	frame += fromhex('0f 00 01') #Magic numbers?
+
+	#MAC-LTE
+	frame += parse_hex(src_frame['MAC-LTE'], 'dlsch_header')
 
 	# Packet Record
-	out += bytes.fromhex('be ef be ef')  # time
-	out += bytes.fromhex('be ef be ef')  # time
-	out += len(raw).to_bytes(4, "little")  # Capture Len
-	out += len(raw).to_bytes(4, 'little')  # Capture Len
+	pcap += fromhex('be ef be ef')  # time
+	pcap += fromhex('be ef be ef')  # time
+	pcap += len(frame).to_bytes(4, "little")  # Capture Len
+	pcap += len(frame).to_bytes(4, 'little')  # Capture Len
 
-	out += raw
+	pcap += frame
 
-	print_hex(out)
+	print_hex(pcap)
 	with open('temp.pcap', 'wb') as f:
-		f.write(out)
+		f.write(pcap)
 
 	loop = asyncio.SelectorEventLoop()  #TODO: This does not work on windows
 	asyncio.set_event_loop(loop)
 
 	#c = pyshark.InMemCapture(eventloop=loop)
 	#c.set_debug(True)
-	#c.parse_packet(out)
+	#c.parse_packet(pcap)
 	c = pyshark.FileCapture('temp.pcap', eventloop=loop)
 
 	#print(c)
-	frame = c.next()
+	srcframe = c.next()
 	c.close()
 
-	return frame
+	return srcframe
 
 def extract(cap: pyshark.FileCapture, credentials: List[SecurityManager]):
 	ues = {}

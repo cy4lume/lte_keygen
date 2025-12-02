@@ -18,10 +18,9 @@ class Color(StrEnum):
 class ColorPrinter:
 	colors = [Color.RED, Color.GREEN, Color.YELLOW, Color.BLUE, Color.MAGENTA, Color.CYAN, Color.WHITE]
 
-	def __init__(self):
+	def __init__(self, lens=[]):
 		self.i = 0
-		self.lens = [5, 0, 30, 0] + [0] * 1000
-		pass
+		self.lens = lens + [0] * 1000
 
 	def print(self, *msg):
 		for s in msg:
@@ -45,6 +44,11 @@ class ColorPrinter:
 
 			self.lens[self.i] = leng
 			self.i += 1
+
+	def println(self, *msg):
+		for m in msg:
+			self.print(m)
+		self.flush()
 
 	def skip(self, n):
 		for i in range(n):

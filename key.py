@@ -169,8 +169,6 @@ class KeyDeriver:
             sn[2] = (mnc & 0x00F0) | ((mnc & 0x0F00) >> 8)
         
         k_asme = kdf_common(FC.K_ASME, key, sn, ak_xor_sqn)
-
-        #print(f"k_asme: {k_asme.hex()}")
         return k_asme
     
     @staticmethod

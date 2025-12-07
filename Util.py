@@ -66,4 +66,16 @@ def print_hex(bytes):
 		print(temp[i:i + 4 * 3], end='  ')
 		if int(i / (4 * 3) + 1) % 4 == 0:
 			print()
-	print()
+
+	if len(bytes) % 16 != 0:
+		print()
+
+
+def first_last_string(msg, leng, sep=' ... '):
+	if len(msg) <= leng:
+		return msg
+	else:
+		l = int((leng - len(sep)) / 2)
+		r = len(msg) - l
+
+		return msg[:l] + sep + msg[r:]

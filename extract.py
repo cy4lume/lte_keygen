@@ -3,18 +3,22 @@ import asyncio
 import csv
 import re
 from enum import unique, StrEnum, Enum
+from io import StringIO
+from itertools import zip_longest
 from typing import List
 import tqdm
 
 import pyshark
 from smspdudecoder.codecs import GSM, UCS2
+from smspdudecoder.fields import SMSDeliver
 
-from Util import ColorPrinter, print_hex
+from Util import ColorPrinter, print_hex, Color, first_last_string
 from key import *
 
 
-MCC = 1
-MNC = 1
+MCC = 0xf001
+MNC = 0xff01
+
 
 @unique
 class Protocol(StrEnum):
@@ -22,6 +26,18 @@ class Protocol(StrEnum):
 	DL_DCCH = 'lte_rrc'
 	NAS_EPS = 'nas-eps'
 	RLC_LTE = 'rlc-lte'
+
+
+@unique
+class RNTIType(IntEnum):
+	RA = 2
+	C = 3
+
+
+@dataclass(frozen=True)
+class RNTI:
+	type: RNTIType
+	rnti: int
 
 
 def parse_hex(mac_lte, param):
@@ -39,7 +55,7 @@ class UE:
 		self.credentials = credentials
 		self.keys = None
 
-		self.printer = ColorPrinter([5, 3, 21, 2])
+		self.printer = ColorPrinter([5, 3, 4, 2, 21, 2])
 
 		self.session = SessionState(
 			rand=None,
@@ -64,176 +80,205 @@ class UE:
 		# 28286
 
 		number = int(frame.frame_info.number)
+
 		mac_lte = frame['mac-lte']
 		fields = set(mac_lte.field_names)
 
+		printer.print(number, self.rnti)
+		direction = int(getattr(mac_lte, 'direction'))
+		printer.print('UP' if direction == 0 else 'DOWN')
+
 		if 'gsm_a_dtap_rand' in fields:
-			printer.print(number, self.rnti, "Auth Request")
-			printer.skip(1)
-
-			if self.session.rand and True:
-				printer.print('Ignored!', 'Ignored!')
-			else:
-
-				#self.session.autn = parse_hex(mac_lte, 'gsm_a_dtap_autn')
-				self.session.rand = parse_hex(mac_lte, 'gsm_a_dtap_rand')
-				self.session.sqn_xor_ak = parse_hex(mac_lte, 'gsm_a_dtap_autn_sqn_xor_ak')
-
-				printer.print(
-				#	f'AUTN: {self.session.autn.hex()}',
-					f'RAND: {''.join(self.session.rand.hex())}',
-					f'sqn^Ak: {''.join(self.session.sqn_xor_ak.hex())}',
-				)
-
+			self.parse_auth_req(mac_lte)
 
 		elif 'nas_eps_emm_toc' in fields:
-			printer.print(number, self.rnti, "Security Mode command")
-			printer.skip(1)
-
-			self.session.enc_alg_id = EEA(parse_int(mac_lte, 'nas_eps_emm_toc'))
-			self.session.int_alg_id = EIA(parse_int(mac_lte, 'nas_eps_emm_toi'))
-
-			printer.print(
-				f'cipher: {self.session.enc_alg_id.name}',
-				f'integrity: {self.session.int_alg_id.name}'
-			)
-
-			printer.flush()
-			self.keys = [mgr.derive_all(self.session) for mgr in self.credentials]
-
+			self.parse_security_mode_command(mac_lte)
 
 		elif 'nas_eps_ciphered_msg' in fields:  #Ciphered message
-			printer.print(number, self.rnti, 'Ciphered')
-			seq = parse_int(mac_lte, 'nas_eps_seq_no')
-			printer.print(seq)
-
-			integrity = getattr(mac_lte, 'nas_eps_msg_auth_code')
-			cipher = parse_hex(mac_lte, 'nas_eps_ciphered_msg')
-
-			printer.print(f'integrity: {integrity}')
-			printer.flush()
-
-			for keys in self.keys:
-				#if number != 12222:
-				#	continue
-
-				key = keys.k_nas_enc
-				print(key.hex())
-				key = key[int(len(key) / 2):]
-				print(f'K NAS enc:                      {key.hex()}')
-
-				ak = int.from_bytes(keys.ak)
-				print(f'count: {seq}')
-				print(f'   ak: {ak}')
-				count = seq ^ ak
-				print(f'COUNT: {count}')
-
-				direction = 1
-
-				# Set to False to enable brue search.
-				for seq in [seq] if True else tqdm.tqdm(range(2 ** 32)):
-					count = seq ^ ak
-
-					for bearer in range(2 ** 5):
-						try:
-							decrypted_raw = liblte_security_encryption_eea2(
-								key,
-								count,
-								bearer,
-								direction,
-								cipher,
-								len(cipher) * 8
-							)
-
-							res = decode2(decrypted_raw)
-							if res:
-								print(f'bearer: {bearer}')
-								#break
-
-						#decrypted = decode2(decrypted_raw)
-						#print(decrypted['mac-lte'].gsm_sms_sms_text)
-						except AttributeError:
-							pass
-				else:
-					print("Could not decrypt message\n")
-
+			self.parse_ciphered(direction, mac_lte)
 
 		elif 'nas_eps_security_header_type' in fields:
-			printer.print(number, self.rnti, 'OTHER')
+			printer.skip(1)
+			printer.print('OTHER NAS-EPS')
+			printer.print('IGNORED!')
 
-			query = [
-				'pdcp_lte_seq_num',
-			]
+		#			query = [
+		#				'pdcp_lte_seq_num',
+		#			]
+		#
+		#			for (i, field) in enumerate(query):
+		#				if field in fields:
+		#					printer.print(getattr(mac_lte, field))
+		#				else:
+		#					printer.skip(1)
+		#
+		#			printer.skip(5)
+		#			printer.print([s for s in fields if 'nas_eps' in s])
 
-			for (i, field) in enumerate(query):
-				if field in fields:
-					printer.print(getattr(mac_lte, field))
-				else:
-					printer.skip(1)
+		elif 'sch_sdu' in fields and not any(['rlc' in field for field in fields]):
+			self.parse_mac_lte(mac_lte)
 
-			printer.skip(5)
-			printer.print([s for s in fields if 'nas_eps' in s])
+		else:
+			printer.skip(1)
+			printer.print(Color.RED + '[TODO]')
 
 		printer.flush()
 
+	def parse_auth_req(self, mac_lte):
+		printer = self.printer
 
-	pass
+		printer.skip(1)
+		printer.print("Auth Request")
+
+		if self.session.rand and False:
+			# Ignore updated auth requests
+			printer.print('Ignored!', 'Ignored!')
+		else:
+
+			#self.session.autn = parse_hex(mac_lte, 'gsm_a_dtap_autn')
+			self.session.rand = parse_hex(mac_lte, 'gsm_a_dtap_rand')
+			self.session.sqn_xor_ak = parse_hex(mac_lte, 'gsm_a_dtap_autn_sqn_xor_ak')
+
+			printer.print(f'sqn^Ak: {''.join(self.session.sqn_xor_ak.hex())}')
+			printer.print(f'RAND: {''.join(self.session.rand.hex())}')
+
+	def parse_security_mode_command(self, mac_lte):
+		printer = self.printer
+
+		printer.skip(1)
+		printer.print("Security Mode command")
+
+		self.session.enc_alg_id = EEA(parse_int(mac_lte, 'nas_eps_emm_toc'))
+		self.session.int_alg_id = EIA(parse_int(mac_lte, 'nas_eps_emm_toi'))
+
+		printer.print(
+			f'message: {self.session.enc_alg_id.name}',
+			f'integrity: {self.session.int_alg_id.name}'
+		)
+
+		printer.flush()
+		self.keys = [mgr.derive_all(self.session) for mgr in self.credentials]
+
+		for keys in self.keys:
+			print('k_asme:')
+			print_hex(keys.k_asme)
+
+			print('K NAS int:')
+			print_hex(keys.k_nas_int)
+
+	def parse_ciphered(self, direction: int, mac_lte):
+		printer = self.printer
+
+		seq = parse_int(mac_lte, 'nas_eps_seq_no')
+		printer.print(seq)
+		printer.print('Ciphered')
+
+		session = self.session
+
+		nas_mac = int(getattr(mac_lte, 'nas_eps_msg_auth_code'), base=16)
+		message = parse_hex(mac_lte, 'nas_eps_ciphered_msg')
+
+		printer.print(f'integrity: {nas_mac:x}')
+		printer.flush()
+
+		print(message.hex())
+
+		for keys in self.keys:
+			key = keys.k_nas_enc
+			key = key[int(len(key) / 2):]
+
+			bearer = 0
+
+			try:
+				if session.enc_alg_id == EEA.EEA0:
+					deciphered_raw = message
+				elif session.enc_alg_id == EEA.EEA2:
+					deciphered_raw = liblte_security_encryption_eea2(
+						key,
+						seq,
+						bearer,
+						direction,
+						message,
+						len(message) * 8
+					)
+				else:
+					print(f"TODO! implement {session.enc_alg_id.name}")
+					raise None
+
+				if not check_integrity(session.int_alg_id, deciphered_raw, nas_mac):
+					print('Failed integrity test!')
+			#	continue
+
+			#print('Deciphered:')
+			#print_hex(deciphered_raw)
+
+			#decode2(deciphered_raw)
+
+			except:
+				pass
+
+	# See TS 36.321
+	def parse_mac_lte(self, mac_lte):
+		printer = self.printer
+
+		lcid = int(getattr(mac_lte, 'dlsch_lcid'), base=16)
+		printer.print(lcid)
+
+		printer.print('MAC-LTE')
+
+		# System frame number, subframe number
+		framenum = parse_int(mac_lte, 'sfn')
+		subframe = parse_int(mac_lte, 'subframe')
+
+		printer.print(f'Frame: {framenum}-{subframe}')
+		printer.print(f'LCID: {lcid}')
+
+		printer.flush()
+
+		#https://stackoverflow.com/a/51522145
+		headers = next(v.all_fields for v in mac_lte._all_fields.values() if v.name == 'mac-lte.sch.subheader')
+		sdus = next(v.all_fields for v in mac_lte._all_fields.values() if v.name == 'mac-lte.sch.sdu')
+
+		headers = [bytes.fromhex(v.raw_value) for v in headers]
+		sdus = [bytes.fromhex(v.raw_value) for v in sdus]
 
 
-def decode(info_nas: bytes, src_frame) -> bytes:
-	#print_hex(raw)
-	fromhex = bytes.fromhex
+		if framenum == 144:
+			for (header, sdu) in zip_longest(headers, sdus):
+				if not sdu:
+					sdu = bytes()
 
-	pcap = bytearray()
+				lcid = header[0] & 0b00011111
 
-	# File Header
-	pcap += fromhex('d4 c3 b2 a1')  # Magic number
-	pcap += fromhex('02 00 04 00')  # Version
-	pcap += fromhex('00 00 00 00')  # 0
-	pcap += fromhex('00 00 00 00')  # 0
-	pcap += fromhex('FF FF 00 00')  # Snap Len
-	pcap += fromhex('93 00 00 00')  # IDK
+				print(f'{header.hex()} ({lcid:05b}):')
 
-	#Frame header???
-	frame = bytearray()
-	frame += fromhex('01 01 03 02')  #Magic numbers?
-	frame += fromhex('00 3d 03 00')  #Magic numbers?
-	frame += fromhex('00 04 2a b4')  #Magic numbers?
-	frame += fromhex('07 01 0a 00')  #Magic numbers?
-	frame += fromhex('0f 00 01')  #Magic numbers?
+				if lcid == 0b00011111:
+					print('Padding!')
+				elif 1 <= lcid <= 10:
+					print(f'Logical channel {lcid}')
+				else:
+					print(Color.RED + 'TODO!, unkown lcid' + Color.END)
 
-	#MAC-LTE
-	frame += parse_hex(src_frame['MAC-LTE'], 'dlsch_header')
+				print()
 
-	# Packet Record
-	pcap += fromhex('be ef be ef')  # time
-	pcap += fromhex('be ef be ef')  # time
-	pcap += len(frame).to_bytes(4, "little")  # Capture Len
-	pcap += len(frame).to_bytes(4, 'little')  # Capture Len
+def check_integrity(algorithm: EIA, message: bytes, integrity: int) -> bool:
+	if algorithm == EIA.EIA0:
+		raise 'TODO'
 
-	pcap += frame
+	elif algorithm == EIA.EIA1:
+		raise 'TODO'
 
-	print_hex(pcap)
-	with open('temp.pcap', 'wb') as f:
-		f.write(pcap)
+	elif algorithm == EIA.EIA2:
+		#TODO
+		return False
 
-	loop = asyncio.SelectorEventLoop()  #TODO: This does not work on windows
-	asyncio.set_event_loop(loop)
-
-	#c = pyshark.InMemCapture(eventloop=loop)
-	#c.set_debug(True)
-	#c.parse_packet(pcap)
-	c = pyshark.FileCapture('temp.pcap', eventloop=loop)
-
-	#print(c)
-	srcframe = c.next()
-	c.close()
-
-	return srcframe
+	else:
+		raise 'TODO'
 
 
 def decode2(info_nas: bytes):
-	printer = ColorPrinter([10, 5])
+	printer = ColorPrinter([0, 10, 5])
+	printer.skip(1)
 
 	#print(info_nas.hex())
 	result = []
@@ -253,7 +298,7 @@ def decode2(info_nas: bytes):
 		#print(f'{i})')
 		#print_hex(info_nas[i:])
 
-		msg = info_nas[i + 29:].hex()
+		msg = info_nas[i + 0:].hex()
 		patterns = ['[a-zA-Z0-9]', '[\u3131-\u314e|\u314f-\u3163|\uac00-\ud7a3]', '[ \t]']
 		reg = '^(' + '|'.join(patterns) + '){3,}$'
 		#reg = '.+'
@@ -274,6 +319,15 @@ def decode2(info_nas: bytes):
 		except:
 			pass
 
+		try:
+			sms = SMSDeliver.decode(StringIO(msg))
+			printer.println(f'offset: {i}', 'SMSDeliver', sms)
+		#if re.search(reg, ucs2):
+		#	printer.println(f'offset: {i}', 'UCS2', ucs2)
+		#	result += ucs2
+		except:
+			pass
+
 	return result
 
 
@@ -281,14 +335,48 @@ def extract(cap: pyshark.FileCapture, credentials: List[SecurityManager]):
 	ues = {}
 
 	for frame in cap:
-		rnti = int(frame["MAC-LTE"].rnti)
+		mac_lte = frame['MAC-LTE']
+		number = int(frame.frame_info.number)
 
-		if rnti == 65535:
+		if number > 400:
+			break
+
+		rnti = RNTI(
+			RNTIType(int(mac_lte.rnti_type)),
+			int(mac_lte.rnti)
+		)
+
+		#Ignore temporary RA-RNTI
+		if rnti.type == RNTIType.RA:
+			continue
+
+		#Ignore UPLink
+		if int(frame['MAC-LTE'].direction) == 0:
 			continue
 
 		if rnti not in ues:
-			print(f"New UE: {rnti}")
-			ues[rnti] = UE(rnti, credentials)
+			print(f'{number}: '.ljust(5), end='')
+			fields = mac_lte.field_names
+
+			if any(['rrc' in field for field in fields]):
+				if 'lte_rrc_rrcconnectionsetup_element' in fields:
+					print(f"New UE: {rnti.rnti}")
+					ues[rnti] = UE(rnti.rnti, credentials)
+
+				elif 'lte_rrc_rrcconnectionreestablishment_element' in fields:
+					print(f"New UE: {rnti.rnti}")
+					ues[rnti] = UE(rnti.rnti, credentials)
+
+					print(Color.RED + 'TODO ' + Color.END + 'Reestablish connection')
+
+				else:
+					print(Color.RED + 'TODO ' + Color.END + 'Other')
+					continue
+
+		if rnti not in ues:
+			print(f'{number}: '.ljust(5), end='')
+			print('SKIP!')
+			continue
 
 		ues[rnti].parse(frame)
 
@@ -298,11 +386,10 @@ if __name__ == '__main__':
 
 	if False:
 		unenc = bytes.fromhex(
-			'07623729013401020480000000002b040881111111110000521130713430631d4135191d5e93d5e13559bd0ecfd5eb78fd9ebebfefef383c0e03'
+			'040881111111110000521130713430631d4135191d5e93d5e13559bd0ecfd5eb78fd9ebebfefef383c0e03'
 		)
 		decode2(unenc)
 		exit(0)
-
 
 	#Parse input parameters
 	parser = argparse.ArgumentParser(
@@ -313,7 +400,7 @@ if __name__ == '__main__':
 	args = parser.parse_args()
 
 	#Fix bug in pyshark
-	loop = asyncio.SelectorEventLoop()  #TODO: This does not work on windows
+	loop = asyncio.new_event_loop()
 	asyncio.set_event_loop(loop)
 
 	# Load SIM credentials
@@ -335,7 +422,11 @@ if __name__ == '__main__':
 	print(credentials)
 
 	# Load pcap file
-	display_filter = '(_ws.col.protocol != "LTE RRC DL_SCH") && !(_ws.col.protocol == "MAC-LTE")'
+	filters = [
+		'(_ws.col.protocol != "LTE RRC DL_SCH")',
+		#		'&& !(_ws.col.protocol == "MAC-LTE")'
+	]
+	display_filter = ''.join(filters)
 	cap = pyshark.FileCapture(args.input, eventloop=loop, display_filter=display_filter)
 
 	extract(cap, credentials)

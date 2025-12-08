@@ -317,8 +317,6 @@ def validate():
     mgr = SecurityManager(sim)
     keys = mgr.derive_all(session)
 
-    #print("\n")
-
     assert keys.ck == bytes.fromhex("b40ba9a3c58b2a05bbf0d987b21bf8cb"), keys.ck.hex()
     assert keys.ik == bytes.fromhex("f769bcd751044604127672711c6d3441")
     assert keys.ak == bytes.fromhex("aa689c648370")
@@ -375,6 +373,112 @@ def liblte_security_encryption_eea2(
     zero_tailing_bits(out, msg_len_bits)
 
     return bytes(out)
+
+def liblte_security_128_eia2(
+    key: bytes,
+    count: int,
+    bearer: int,
+    direction: int, # 0: uplink, 1: downlink
+    msg: bytes,
+    msg_len_bits: int,
+    mac: bytes
+):
+    if len(key) != 16:
+        return False
+    if msg_len_bits < 0 or msg_len_bits > len(msg) * 8:
+        return False
+    if len(mac) < 4:
+        return False
+
+    def bytes_to_bits(b: bytes) -> list[int]:
+        bits = []
+        for byte in b:
+            for bit in range(7, -1, -1):  # MSB first
+                bits.append(1 if (byte >> bit) & 1 else 0)
+        return bits
+
+    header = bytearray(8)
+    header[0] = (count >> 24) & 0xFF
+    header[1] = (count >> 16) & 0xFF
+    header[2] = (count >> 8) & 0xFF
+    header[3] = count & 0xFF
+    header[4] = ((bearer & 0x1F) << 3) | ((direction & 0x01) << 2)
+
+    header_bits = bytes_to_bits(header)
+    msg_bits_all = bytes_to_bits(msg)
+    msg_bits = msg_bits_all[:msg_len_bits]
+
+    bits = header_bits + msg_bits
+    total_bits = len(bits)
+
+    full_blocks, rem = divmod(total_bits, 128)
+    last_complete = (rem == 0)
+    n_blocks = full_blocks if last_complete else full_blocks + 1
+
+    if n_blocks == 0:
+        return False
+
+    blocks_bits: list[list[int]] = []
+
+    for i in range(full_blocks):
+        blocks_bits.append(bits[i * 128:(i + 1) * 128])
+
+    if not last_complete:
+        tail = bits[full_blocks * 128:]
+        last_bits = tail + [1] + [0] * (128 - len(tail) - 1)
+        blocks_bits.append(last_bits)
+    else:
+        blocks_bits.append(bits[(n_blocks - 1) * 128:n_blocks * 128])
+
+    def bits_to_bytes(bits_block: list[int]) -> bytes:
+        assert len(bits_block) == 128
+        out = bytearray(16)
+        for i, b in enumerate(bits_block):
+            if b:
+                byte_idx = i // 8
+                bit_idx = 7 - (i % 8)
+                out[byte_idx] |= (1 << bit_idx)
+        return bytes(out)
+
+    blocks = [bits_to_bytes(bb) for bb in blocks_bits]
+
+    cipher = AES.new(key, AES.MODE_ECB)
+    L = cipher.encrypt(bytes(16))  # AES(0^128)
+
+    def left_shift_128(x: bytes) -> bytes:
+        v = int.from_bytes(x, "big")
+        v = (v << 1) & ((1 << 128) - 1)
+        return v.to_bytes(16, "big")
+
+    const_rb = 0x87
+
+    K1 = left_shift_128(L)
+    if L[0] & 0x80:
+        K1 = (int.from_bytes(K1, "big") ^ const_rb).to_bytes(16, "big")
+
+    K2 = left_shift_128(K1)
+    if K1[0] & 0x80:
+        K2 = (int.from_bytes(K2, "big") ^ const_rb).to_bytes(16, "big")
+
+    T = bytes(16)
+
+    for i in range(n_blocks - 1):
+        block = blocks[i]
+        tmp = bytes(a ^ b for a, b in zip(T, block))
+        T = cipher.encrypt(tmp)
+
+    last_block = blocks[-1]
+    if last_complete:
+        m_last = bytes(a ^ b for a, b in zip(last_block, K1))
+    else:
+        m_last = bytes(a ^ b for a, b in zip(last_block, K2))
+
+    tmp = bytes(a ^ b for a, b in zip(T, m_last))
+    T = cipher.encrypt(tmp)
+
+    mac_i = T[:4]
+
+    return hmac.compare_digest(mac_i, mac[:4])
 
 if __name__ == "__main__":
     validate()

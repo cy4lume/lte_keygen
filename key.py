@@ -382,7 +382,7 @@ def liblte_security_128_eia2(
     msg: bytes,
     msg_len_bits: int,
     mac: bytes
-):
+) -> bool:
     if len(key) != 16:
         return False
     if msg_len_bits < 0 or msg_len_bits > len(msg) * 8:

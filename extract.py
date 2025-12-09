@@ -12,12 +12,14 @@ import pyshark
 from smspdudecoder.codecs import GSM, UCS2
 from smspdudecoder.fields import SMSDeliver
 
-from Util import ColorPrinter, print_hex, Color, first_last_string
+from Util import *
 from key import *
 
 
 MCC = 0xf001
 MNC = 0xff01
+
+log = ColorPrinter()
 
 
 @unique
@@ -41,7 +43,8 @@ class RNTI:
 
 
 def parse_hex(mac_lte, param):
-	return bytes.fromhex(''.join(getattr(mac_lte, param).split(':')))
+	raw = str(getattr(mac_lte, param)).removeprefix('0x')
+	return Data(bytes.fromhex(''.join(raw.split(':'))))
 
 
 def parse_int(mac_lte, param):
@@ -54,8 +57,6 @@ class UE:
 		self.rnti = rnti
 		self.credentials = credentials
 		self.keys = None
-
-		self.printer = ColorPrinter([5, 3, 4, 2, 21, 2])
 
 		self.session = SessionState(
 			rand=None,
@@ -70,10 +71,8 @@ class UE:
 
 
 	def parse(self, frame):
-		#if self.rnti != 61:
-		#	return
-
-		printer = self.printer
+		if self.rnti != 62:
+			return
 
 		#Funky packets:
 		# 13053
@@ -84,9 +83,9 @@ class UE:
 		mac_lte = frame['mac-lte']
 		fields = set(mac_lte.field_names)
 
-		printer.print(number, self.rnti)
+		log.print_tab(number, self.rnti)
 		direction = int(getattr(mac_lte, 'direction'))
-		printer.print('UP' if direction == 0 else 'DOWN')
+		log.print_tab('UP' if direction == 0 else 'DOWN')
 
 		if 'gsm_a_dtap_rand' in fields:
 			self.parse_auth_req(mac_lte)
@@ -98,142 +97,147 @@ class UE:
 			self.parse_ciphered(direction, mac_lte)
 
 		elif 'nas_eps_security_header_type' in fields:
-			printer.skip(1)
-			printer.print('OTHER NAS-EPS')
-			printer.print('IGNORED!')
-
-		#			query = [
-		#				'pdcp_lte_seq_num',
-		#			]
-		#
-		#			for (i, field) in enumerate(query):
-		#				if field in fields:
-		#					printer.print(getattr(mac_lte, field))
-		#				else:
-		#					printer.skip(1)
-		#
-		#			printer.skip(5)
-		#			printer.print([s for s in fields if 'nas_eps' in s])
+			log.skip_tab(1)
+			log.print_tab('OTHER NAS-EPS')
+			log.print_tab('IGNORED!')
 
 		elif 'sch_sdu' in fields and not any(['rlc' in field for field in fields]):
 			self.parse_mac_lte(mac_lte)
 
 		else:
-			printer.skip(1)
-			printer.print(Color.RED + '[TODO]')
+			log.skip_tab(1)
+			log.print_tab(Color.RED + '[TODO]')
 
-		printer.flush()
+		log.flush_tab()
 
 	def parse_auth_req(self, mac_lte):
-		printer = self.printer
-
-		printer.skip(1)
-		printer.print("Auth Request")
+		log.skip_tab(1)
+		log.print_tab("Auth Request")
 
 		if self.session.rand and False:
 			# Ignore updated auth requests
-			printer.print('Ignored!', 'Ignored!')
+			log.print_tab('Ignored!', 'Ignored!')
 		else:
 
 			#self.session.autn = parse_hex(mac_lte, 'gsm_a_dtap_autn')
 			self.session.rand = parse_hex(mac_lte, 'gsm_a_dtap_rand')
 			self.session.sqn_xor_ak = parse_hex(mac_lte, 'gsm_a_dtap_autn_sqn_xor_ak')
 
-			printer.print(f'sqn^Ak: {''.join(self.session.sqn_xor_ak.hex())}')
-			printer.print(f'RAND: {''.join(self.session.rand.hex())}')
+			log.print_tab(f'sqn^Ak: {''.join(self.session.sqn_xor_ak.hex())}')
+			log.print_tab(f'RAND: {''.join(self.session.rand.hex())}')
 
 	def parse_security_mode_command(self, mac_lte):
-		printer = self.printer
-
-		printer.skip(1)
-		printer.print("Security Mode command")
+		log.skip_tab(1)
+		log.print_tab("Security Mode command")
 
 		self.session.enc_alg_id = EEA(parse_int(mac_lte, 'nas_eps_emm_toc'))
 		self.session.int_alg_id = EIA(parse_int(mac_lte, 'nas_eps_emm_toi'))
 
-		printer.print(
+		log.print_tab(
 			f'message: {self.session.enc_alg_id.name}',
 			f'integrity: {self.session.int_alg_id.name}'
 		)
 
-		printer.flush()
+		log.flush_tab()
 		self.keys = [mgr.derive_all(self.session) for mgr in self.credentials]
 
 		for keys in self.keys:
 			print('k_asme:')
-			print_hex(keys.k_asme)
+			log.print_hex(keys.k_asme)
 
 			print('K NAS int:')
-			print_hex(keys.k_nas_int)
+			log.print_hex(keys.k_nas_int)
 
 	def parse_ciphered(self, direction: int, mac_lte):
-		printer = self.printer
-
 		seq = parse_int(mac_lte, 'nas_eps_seq_no')
-		printer.print(seq)
-		printer.print('Ciphered')
+		log.print_tab(seq)
+		log.print_tab('Ciphered')
 
 		session = self.session
 
-		nas_mac = int(getattr(mac_lte, 'nas_eps_msg_auth_code'), base=16)
-		message = parse_hex(mac_lte, 'nas_eps_ciphered_msg')
+		mac = parse_hex(mac_lte, 'nas_eps_msg_auth_code')
+		ciphered_message = parse_hex(mac_lte, 'nas_eps_ciphered_msg')
 
-		printer.print(f'integrity: {nas_mac:x}')
-		printer.flush()
+		log.print_tab(f'integrity: {mac.hex()}')
+		log.flush_tab()
 
-		print(message.hex())
+		print(ciphered_message.hex())
 
-		for keys in self.keys:
-			key = keys.k_nas_enc
-			key = key[int(len(key) / 2):]
+		deciphered_message = None
+		if session.enc_alg_id == EEA.EEA0 and session.int_alg_id == EIA.EIA0:
+			deciphered_message = ciphered_message
 
-			bearer = 0
+		elif self.keys:
+			for keys in self.keys:
+				key_enc = keys.k_nas_enc[16:]
+				key_int = keys.k_nas_int[16:]
 
-			try:
+				bearer = 0
+
 				if session.enc_alg_id == EEA.EEA0:
-					deciphered_raw = message
+					deciphered_message = ciphered_message
+
 				elif session.enc_alg_id == EEA.EEA2:
-					deciphered_raw = liblte_security_encryption_eea2(
-						key,
+					deciphered_message = Data(liblte_security_encryption_eea2(
+						key_enc,
 						seq,
 						bearer,
 						direction,
-						message,
-						len(message) * 8
-					)
+						ciphered_message,
+						len(ciphered_message) * 8
+					))
 				else:
 					print(f"TODO! implement {session.enc_alg_id.name}")
-					raise None
+					return
 
-				if not check_integrity(session.int_alg_id, deciphered_raw, nas_mac):
-					print('Failed integrity test!')
-			#	continue
+				print('Skipping integrity check!')
+				break
 
-			#print('Deciphered:')
-			#print_hex(deciphered_raw)
+				#TODO: Get this working!!!
+				if session.int_alg_id == EIA.EIA2:
+					if liblte_security_128_eia2(
+						key_int,
+						seq,
+						bearer,
+						direction,
+						ciphered_message,
+						len(ciphered_message) * 8,
+						mac
+					):
+						break
+					else:
+						deciphered_message = None
+						print('Failed integrity check!')
+				else:
+					print(f'TODO! implement {session.int_alg_id.name}')
+					return
 
-			#decode2(deciphered_raw)
+		else:
+			print('Missing Auth Request!')
 
-			except:
-				pass
+		if not deciphered_message:
+			print('Could not decipher data!')
+			return
+
+		log.push()
+		parse_L3(deciphered_message)
+		log.pop()
 
 	# See TS 36.321
 	def parse_mac_lte(self, mac_lte):
-		printer = self.printer
-
 		lcid = int(getattr(mac_lte, 'dlsch_lcid'), base=16)
-		printer.print(lcid)
+		log.print_tab(lcid)
 
-		printer.print('MAC-LTE')
+		log.print_tab('MAC-LTE')
 
 		# System frame number, subframe number
 		framenum = parse_int(mac_lte, 'sfn')
 		subframe = parse_int(mac_lte, 'subframe')
 
-		printer.print(f'Frame: {framenum}-{subframe}')
-		printer.print(f'LCID: {lcid}')
+		log.print_tab(f'Frame: {framenum}-{subframe}')
+		log.print_tab(f'LCID: {lcid}')
 
-		printer.flush()
+		log.flush_tab()
 
 		#https://stackoverflow.com/a/51522145
 		headers = next(v.all_fields for v in mac_lte._all_fields.values() if v.name == 'mac-lte.sch.subheader')
@@ -241,7 +245,6 @@ class UE:
 
 		headers = [bytes.fromhex(v.raw_value) for v in headers]
 		sdus = [bytes.fromhex(v.raw_value) for v in sdus]
-
 
 		if framenum == 144:
 			for (header, sdu) in zip_longest(headers, sdus):
@@ -261,52 +264,180 @@ class UE:
 
 				print()
 
-def check_integrity(algorithm: EIA, message: bytes, integrity: int) -> bool:
-	if algorithm == EIA.EIA0:
-		raise 'TODO'
 
-	elif algorithm == EIA.EIA1:
-		raise 'TODO'
+def parse_L3(L3: Data):
+	#TS 24.007, 24.301
 
-	elif algorithm == EIA.EIA2:
-		#TODO
-		return False
+	log.print('Parsing L3 Packet:', color=Color.MAGENTA)
+	log.print_hex(L3)
+
+	security, protocol = split_byte(L3.pop(), 4)  #IDK should be 0?
+	msg_type = L3.pop()
+
+	if protocol == 0b0111:
+		log.print('EPS MM')
+
+		if msg_type == 0x62:
+			log.push()
+			log.print('DL NAS transport', color=Color.MAGENTA)
+
+			length = L3.pop()
+			nas_msg = L3
+
+			assert length == len(nas_msg)
+
+			parse_nas_message_container(nas_msg)
+
+			log.pop()
+		else:
+			log.print(f'OTHER (0x{msg_type:02x})', 'Ignored!')
+	else:
+		log.print(f'OTHER (0x{protocol:04b})', 'Ignored!')
+
+	log.flush_tab()
+
+	pass
+
+
+def parse_nas_message_container(nas_msg):
+	#TS 24.011
+	log.print_hex(nas_msg)
+
+	_, _, protocol = split_byte(nas_msg.pop(), 1, 3, 4)
+
+	if protocol == 0x09:
+		log.print('CP-DATA')
+		iei = nas_msg.pop()
+
+		if iei == 0x01:
+			log.print('RPDU')
+
+			length = nas_msg.pop()
+			rpdu = nas_msg
+
+			assert length == len(rpdu), 'RPDU length does not match data'
+
+			msg_type = rpdu.pop() & 0b0000_0111
+			msg_ref = rpdu.pop()
+
+			if msg_type == 0b001:
+				log.push()
+				log.print('RP-DATA', color=Color.MAGENTA)
+
+				origin_address_len = rpdu.pop()
+				#TODO! Read the address
+
+				tpdu = Data(rpdu[1 + origin_address_len:])
+				parse_tpdu(tpdu)
+				log.pop()
+
+			else:
+				log.print_tab(f'OTHER type(0x{msg_type:03b})', 'Ignored!')
+
+		else:
+			log.print_tab(f'OTHER iei({iei:02x})', 'Ignored!')
 
 	else:
-		raise 'TODO'
+		log.print_tab(f'OTHER protocol({protocol:02x})', 'Ignored!')
+
+	log.flush_tab()
 
 
-def decode2(info_nas: bytes):
-	printer = ColorPrinter([0, 10, 5])
-	printer.skip(1)
+def parse_tpdu(tpdu: Data):
+	# TS 23 040
+	length = tpdu.pop()
+	assert length == len(tpdu), 'TPDU length does not match data'
 
-	#print(info_nas.hex())
+	msg_type = tpdu.pop() & 0b0000_0011
+
+	if msg_type == 0:
+		log.print('SMS-DELIVER')
+		log.print_hex(tpdu)
+
+		log.print()
+		_ = parse_address(tpdu)
+		log.print_hex(tpdu)
+
+		protocol = tpdu.pop()
+		#TODO: parse protocol byte
+
+		coding_scheme = tpdu.pop()  # TS 23 038
+		#TODO: parse coding scheme fully
+
+		if coding_scheme & 0b1100_0000 == 0:
+			if coding_scheme & 0b0010_0000 == 0:
+				charset = (coding_scheme & 0b0000_1100) >> 2
+
+				time_stamp = tpdu.pop(7)
+				log.print(f'Timestamp: {time_stamp.hex(' ')}')
+				#TODO: parse time stamp
+
+				parse_tpud(tpdu, charset)
+			else:
+				log.print('TODO: uncompress message')
+
+		else:
+			log.print('TODO: implement coding scheme {coding_scheme:08b}')
+
+	else:
+		log.print_tab(f'OTHER ({msg_type:02b})', 'Ignored!')
+
+	log.flush_tab()
+
+
+def parse_tpud(tpud: Data, charset: int):
+	data_length = tpud.pop()
+	assert data_length == len(tpud), 'TP-User-Data length does not match data'
+
+	if charset == 2:
+		log.print('SMS encoding: UCS2')
+		log.print(tpud.decode('utf_16_be'))
+	else:
+		log.print('TODO: implement charset {charset:02b}')
+
+
+# TODO: actually parse address
+# TS 24 011
+def parse_address(data: Data) -> None:
+	length = data.pop()
+
+	while True:
+		if data.pop() & 0x80 != 0:
+			break
+
+	data.pop(int((length + 1) / 2))
+	return None
+
+
+def decode(info_nas: bytes):
+	log.skip_tab(1)
+
+	log.print_hex(info_nas)
+
+	patterns = [
+		# Alpha Numberics
+		'[a-zA-Z0-9]',
+
+		# Punctuation
+		'[,.-_;:"\'!?()\\[\\]{}\\\\]',
+
+		# Korean letters
+		'[\u3131-\u314e|\u314f-\u3163|\uac00-\ud7a3]',
+
+		# Whitespace
+		'[ \t\n]'
+	]
+	reg = '^(?:' + '|'.join(patterns) + '){3,}$'
+	print(repr(reg))
+
 	result = []
 	for i in range(len(info_nas) - 2):
-		## ....1001 marks SMS
-		#if 0b1111_1001 != info_nas[i]:
-		#	continue
-
-		## Magic?
-		#if info_nas[i + 1] != 0x01:
-		#	continue
-
-		## Length of message
-		#if info_nas[i+2] == (len(info_nas) - i - 3):
-		#	continue
-
-		#print(f'{i})')
-		#print_hex(info_nas[i:])
-
 		msg = info_nas[i + 0:].hex()
-		patterns = ['[a-zA-Z0-9]', '[\u3131-\u314e|\u314f-\u3163|\uac00-\ud7a3]', '[ \t]']
-		reg = '^(' + '|'.join(patterns) + '){3,}$'
-		#reg = '.+'
 
 		try:
 			gsm = GSM.decode(msg)
-			if re.search(reg, gsm):
-				printer.println(f'offset: {i}', 'GSM', gsm)
+			if re.search(reg, gsm) or False:
+				log.println(f'offset: {i}', 'GSM', gsm)
 				result += gsm
 		except:
 			pass
@@ -314,19 +445,21 @@ def decode2(info_nas: bytes):
 		try:
 			ucs2 = UCS2.decode(msg)
 			if re.search(reg, ucs2):
-				printer.println(f'offset: {i}', 'UCS2', ucs2)
+				log.println(f'offset: {i}', 'UCS2', ucs2)
 				result += ucs2
 		except:
 			pass
 
 		try:
 			sms = SMSDeliver.decode(StringIO(msg))
-			printer.println(f'offset: {i}', 'SMSDeliver', sms)
+			log.println(f'offset: {i}', 'SMSDeliver', sms)
 		#if re.search(reg, ucs2):
-		#	printer.println(f'offset: {i}', 'UCS2', ucs2)
+		#	log.println(f'offset: {i}', 'UCS2', ucs2)
 		#	result += ucs2
 		except:
 			pass
+
+		log.flush_tab()
 
 	return result
 
@@ -338,7 +471,7 @@ def extract(cap: pyshark.FileCapture, credentials: List[SecurityManager]):
 		mac_lte = frame['MAC-LTE']
 		number = int(frame.frame_info.number)
 
-		if number > 400:
+		if number > 2005:
 			break
 
 		rnti = RNTI(
@@ -370,7 +503,7 @@ def extract(cap: pyshark.FileCapture, credentials: List[SecurityManager]):
 					print(Color.RED + 'TODO ' + Color.END + 'Reestablish connection')
 
 				else:
-					print(Color.RED + 'TODO ' + Color.END + 'Other')
+					print(Color.RED + 'TODO ' + Color.END + 'OTHER')
 					continue
 
 		if rnti not in ues:
@@ -384,14 +517,16 @@ def extract(cap: pyshark.FileCapture, credentials: List[SecurityManager]):
 if __name__ == '__main__':
 	#((_ws.col.protocol != "LTE RRC DL_SCH") && !(_ws.col.protocol == "MAC-LTE")) && (mac-lte.rnti == 61)
 
-	if False:
-		unenc = bytes.fromhex(
-			'040881111111110000521130713430631d4135191d5e93d5e13559bd0ecfd5eb78fd9ebebfefef383c0e03'
-		)
-		decode2(unenc)
-		exit(0)
-
 	#Parse input parameters
+
+#	for i in range(8):
+#		temp = split_byte(1 << i, 3, 3)
+#
+#		for b in temp:
+#			print(f'{b:08b}', end=', ')
+#		print()
+#	exit(1)
+
 	parser = argparse.ArgumentParser(
 		prog="extract"
 	)
@@ -407,7 +542,7 @@ if __name__ == '__main__':
 	credentials = []
 	with open(args.credentials, newline='') as f:
 		reader = csv.reader(f)
-		reader.__next__()# Skip header row
+		reader.__next__()  # Skip header row
 
 		for row in reader:
 			imsi, k, opc = row
@@ -419,12 +554,13 @@ if __name__ == '__main__':
 			)
 			credentials.append(SecurityManager(sim))
 
+	print('Credentials:')
 	print(credentials)
 
 	# Load pcap file
 	filters = [
 		'(_ws.col.protocol != "LTE RRC DL_SCH")',
-		#		'&& !(_ws.col.protocol == "MAC-LTE")'
+		'&& !(_ws.col.protocol == "MAC-LTE")'
 	]
 	display_filter = ''.join(filters)
 	cap = pyshark.FileCapture(args.input, eventloop=loop, display_filter=display_filter)

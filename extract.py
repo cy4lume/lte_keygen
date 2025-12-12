@@ -6,7 +6,7 @@ from enum import unique, StrEnum, Enum
 from io import StringIO
 from itertools import zip_longest
 from typing import List
-import tqdm
+from rlc import *
 
 import pyshark
 from smspdudecoder.codecs import GSM, UCS2
@@ -68,6 +68,7 @@ class UE:
 			int_alg_id=None,
 		)
 
+		self.reassembler = LteRlcAmReassembler("output_manual99.pcap", )
 
 	def parse(self, frame):
 		#Funky packets:
@@ -97,7 +98,7 @@ class UE:
 			log.print_tab('OTHER NAS-EPS')
 			log.print_tab('IGNORED!')
 
-		elif 'sch_sdu' in fields and not any(['rlc' in field for field in fields]):
+		elif 'sch_sdu' in fields and not any(['nas' in field for field in fields]):
 			self.parse_mac_lte(mac_lte)
 
 		else:
@@ -241,9 +242,31 @@ class UE:
 
 		headers = [bytes.fromhex(v.raw_value) for v in headers]
 		sdus = [bytes.fromhex(v.raw_value) for v in sdus]
+		
+		if True:
+			s_i = 0
+			for header in headers:
+				lcid = header[0] & 0b00011111
+				print(f'{header.hex()} ({lcid:05b}):')
+				if lcid == 0b00011111:
+					print('Padding!')
+					continue
+				elif lcid == 0b00011101:
+					print('Timing Advance!')
+					continue
+				elif 1 <= lcid <= 16:
+					print(f'Logical channel {lcid}')
+					pass
+				else:
+					print(Color.RED + 'TODO!, unkown lcid' + Color.END)
+					continue
+				
+				sdu = sdus[s_i]
+				s_i += 1
+				if lcid == 3:
+					self.reassembler.process_rlc_pdu(sdu)
 
-		if framenum == 144:
-			for (header, sdu) in zip_longest(headers, sdus):
+			"""for (header, sdu) in zip_longest(headers, sdus):
 				if not sdu:
 					sdu = bytes()
 
@@ -258,7 +281,7 @@ class UE:
 				else:
 					print(Color.RED + 'TODO!, unkown lcid' + Color.END)
 
-				print()
+				print(sdu)"""
 
 
 def parse_L3(L3: Data):
@@ -535,7 +558,7 @@ if __name__ == '__main__':
 	# Load pcap file
 	filters = [
 		'(_ws.col.protocol != "LTE RRC DL_SCH")',
-		'&& !(_ws.col.protocol == "MAC-LTE")'
+	#	'&& !(_ws.col.protocol == "MAC-LTE")'
 	]
 	display_filter = ''.join(filters)
 	cap = pyshark.FileCapture(args.input, eventloop=loop, display_filter=display_filter)

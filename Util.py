@@ -1,4 +1,5 @@
 import sys
+from collections.abc import Iterable
 from enum import StrEnum, unique
 from itertools import count
 
@@ -18,18 +19,26 @@ class Color(StrEnum):
 
 
 class ColorPrinter:
-	colors = [Color.RED, Color.GREEN, Color.YELLOW, Color.BLUE, Color.MAGENTA, Color.CYAN, Color.WHITE]
+	colors = [Color.GREEN, Color.YELLOW, Color.BLUE, Color.RED,  Color.MAGENTA, Color.CYAN, Color.WHITE]
 
 	def __init__(self, lens=[]):
 		self.i = 0
 		self.lens = lens + [0] * 1000
+
 		self.stack = []
 		self.depth = 0
+
+		self.newline = True
+		self.new_push = False
 
 	@property
 	def _prefix(self):
 		if self.depth > 0:
-			return '| ' * self.depth
+			if self.new_push:
+				self.new_push = False
+				return '│ ' * (self.depth-1) + '┌─'
+			else:
+				return '│ ' * self.depth
 		else:
 			return ''
 
@@ -37,12 +46,19 @@ class ColorPrinter:
 		if self.i != 0:
 			self.flush_tab()
 
-		print(self._prefix, end='')
+		if self.newline:
+			print(self._prefix, end='')
 
 		if color:
 			print(color, end='')
 
-		print(*msg, end=end)
+		if isinstance(msg, Iterable):
+			msg = ', '.join(str(e) for e in msg)
+		elif not isinstance(msg, str):
+			msg = str(msg)
+
+		print(msg, end=end)
+		self.newline = end == '\n' or (msg and msg[-1] == '\n')
 
 		print(Color.END, end='')
 
@@ -50,22 +66,19 @@ class ColorPrinter:
 		temp = msg.hex()
 
 		for i in range(len(temp)):
-			if i % 32 == 0:
-				print(self._prefix, end='')
-
-			print(temp[i], end='')
+			self.print(temp[i], end='')
 
 			if (i + 1) % 2 == 0:
-				print(' ', end='')
+				self.print(' ', end='')
 
 			if (i + 1) % 8 == 0:
-				print('  ', end='')
+				self.print('  ', end='')
 
 			if (i + 1) % 32 == 0:
-				print('\n', end='')
+				self.print('\n', end='')
 
 		if len(msg) % 16 != 0:
-			print()
+			self.print()
 
 	def print_tab(self, *msg):
 		for s in msg:
@@ -102,13 +115,23 @@ class ColorPrinter:
 			self.i = 0
 			print()
 
-	def push(self):
+	def push(self, msg=None):
+		if self.i != 0:
+			self.flush_tab()
+
 		self.depth += 1
 		self.stack.append((self.lens, self.i))
 		self.lens = [0] * 1000
 		self.i = 0
+		self.new_push = True
+
+		if msg:
+			self.print(msg)
 
 	def pop(self):
+		if self.i != 0:
+			self.flush_tab()
+
 		self.depth -= 1
 		self.lens, self.i = self.stack.pop()
 

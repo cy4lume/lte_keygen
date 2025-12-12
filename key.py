@@ -110,6 +110,25 @@ class Milenage:
         self.opc = opc
         self.cipher = AES.new(k, AES.MODE_ECB)
 
+    def f1(self, rand: bytes, sqn: bytes, amf: bytes) -> bytes:
+        opc = self.opc
+        cipher = self.cipher
+
+        input = bytearray(x ^ y for x, y in zip(rand, opc))
+        temp = cipher.encrypt(input)
+
+        in1 = sqn + amf + sqn + amf
+
+        for i in range(16):
+            input[(i + 8) % 16] = in1[i] ^ opc[i]
+
+        input[:] = [x ^ y for x, y in zip(input, temp)]
+        out1 = cipher.encrypt(input)
+
+        out1 = bytes(x ^ y for x, y in zip(out1, opc))
+
+        return out1[:8]
+
     def f2345(self, rand:bytes) -> tuple:
         opc = self.opc
         cipher = self.cipher

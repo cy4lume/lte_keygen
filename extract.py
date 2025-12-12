@@ -10,7 +10,6 @@ import tqdm
 
 import pyshark
 from smspdudecoder.codecs import GSM, UCS2
-from smspdudecoder.fields import SMSDeliver
 
 from Util import *
 from key import *
@@ -71,9 +70,6 @@ class UE:
 
 
 	def parse(self, frame):
-		if self.rnti != 62:
-			return
-
 		#Funky packets:
 		# 13053
 		# 28286
@@ -196,13 +192,13 @@ class UE:
 				#TODO: Get this working!!!
 				if session.int_alg_id == EIA.EIA2:
 					if liblte_security_128_eia2(
-						key_int,
-						seq,
-						bearer,
-						direction,
-						ciphered_message,
-						len(ciphered_message) * 8,
-						mac
+							key_int,
+							seq,
+							bearer,
+							direction,
+							ciphered_message,
+							len(ciphered_message) * 8,
+							mac
 					):
 						break
 					else:
@@ -372,7 +368,10 @@ def parse_tpdu(tpdu: Data):
 				log.print(f'Timestamp: {time_stamp.hex(' ')}')
 				#TODO: parse time stamp
 
+				log.push()
+				log.print('SMS data', color=Color.MAGENTA)
 				parse_tpud(tpdu, charset)
+				log.pop()
 			else:
 				log.print('TODO: uncompress message')
 
@@ -386,14 +385,23 @@ def parse_tpdu(tpdu: Data):
 
 
 def parse_tpud(tpud: Data, charset: int):
-	data_length = tpud.pop()
-	assert data_length == len(tpud), 'TP-User-Data length does not match data'
+	message_length = tpud.pop()
+	#assert data_length == len(tpud), 'TP-User-Data length does not match data'
 
-	if charset == 2:
-		log.print('SMS encoding: UCS2')
-		log.print(tpud.decode('utf_16_be'))
+	log.print_hex(tpud)
+
+	log.print('SMS encoding: ', end='')
+	if charset == 0:
+		log.print('GSM7')
+		sms = decode_GSM7(tpud, message_length)
+	elif charset == 2:
+		log.print('UCS2')
+		sms = tpud.decode('utf_16_be')
 	else:
-		log.print('TODO: implement charset {charset:02b}')
+		log.print(f'TODO: implement charset {charset:02b}')
+		return
+
+	log.print(sms)
 
 
 # TODO: actually parse address
@@ -409,59 +417,29 @@ def parse_address(data: Data) -> None:
 	return None
 
 
-def decode(info_nas: bytes):
-	log.skip_tab(1)
-
-	log.print_hex(info_nas)
-
-	patterns = [
-		# Alpha Numberics
-		'[a-zA-Z0-9]',
-
-		# Punctuation
-		'[,.-_;:"\'!?()\\[\\]{}\\\\]',
-
-		# Korean letters
-		'[\u3131-\u314e|\u314f-\u3163|\uac00-\ud7a3]',
-
-		# Whitespace
-		'[ \t\n]'
+def decode_GSM7(message: Data, length: int) -> str:
+	# TS 23 038
+	table = [
+		'@', '£', '$', '¥', 'è', 'é', 'ù', 'ì', 'ò', 'Ç', 'LF', 'Ø', 'ø', 'CR', 'Å', 'å',
+		'D', '_', 'F', 'G', 'L', 'W', 'P', 'Y', 'S', 'Q', 'X', '1)', 'Æ', 'æ', 'ß', 'É',
+		'SP', '!', '"', '#', '¤', '%', '&', "'", '(', ')', '*', '+', ',', '-', '.', '/',
+		'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', ':', ';', '<', '=', '>', '?',
+		'¡', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O',
+		'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', 'Ä', 'Ö', 'Ñ', 'Ü', '§',
+		'¿', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o',
+		'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', 'ä', 'ö', 'ñ', 'ü', 'à',
 	]
-	reg = '^(?:' + '|'.join(patterns) + '){3,}$'
-	print(repr(reg))
 
-	result = []
-	for i in range(len(info_nas) - 2):
-		msg = info_nas[i + 0:].hex()
+	decompress = Data()
+	byte = 0
+	residue = 0
+	i = 0
+	while len(decompress) < length:
+		byte, residue = split_byte(message.pop(), 7)
 
-		try:
-			gsm = GSM.decode(msg)
-			if re.search(reg, gsm) or False:
-				log.println(f'offset: {i}', 'GSM', gsm)
-				result += gsm
-		except:
-			pass
 
-		try:
-			ucs2 = UCS2.decode(msg)
-			if re.search(reg, ucs2):
-				log.println(f'offset: {i}', 'UCS2', ucs2)
-				result += ucs2
-		except:
-			pass
+	log.print_hex(decompress)
 
-		try:
-			sms = SMSDeliver.decode(StringIO(msg))
-			log.println(f'offset: {i}', 'SMSDeliver', sms)
-		#if re.search(reg, ucs2):
-		#	log.println(f'offset: {i}', 'UCS2', ucs2)
-		#	result += ucs2
-		except:
-			pass
-
-		log.flush_tab()
-
-	return result
 
 
 def extract(cap: pyshark.FileCapture, credentials: List[SecurityManager]):
@@ -470,9 +448,6 @@ def extract(cap: pyshark.FileCapture, credentials: List[SecurityManager]):
 	for frame in cap:
 		mac_lte = frame['MAC-LTE']
 		number = int(frame.frame_info.number)
-
-		if number > 2005:
-			break
 
 		rnti = RNTI(
 			RNTIType(int(mac_lte.rnti_type)),
@@ -519,13 +494,13 @@ if __name__ == '__main__':
 
 	#Parse input parameters
 
-#	for i in range(8):
-#		temp = split_byte(1 << i, 3, 3)
-#
-#		for b in temp:
-#			print(f'{b:08b}', end=', ')
-#		print()
-#	exit(1)
+	#	for i in range(8):
+	#		temp = split_byte(1 << i, 3, 3)
+	#
+	#		for b in temp:
+	#			print(f'{b:08b}', end=', ')
+	#		print()
+	#	exit(1)
 
 	parser = argparse.ArgumentParser(
 		prog="extract"

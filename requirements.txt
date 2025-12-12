@@ -2,3 +2,5 @@ pyshark
 smspdudecoder
 cryptography
 cryptomobile @ git+https://github.com/mitshell/CryptoMobile@0857cbb
+pyasn1
+pyasn1-modules

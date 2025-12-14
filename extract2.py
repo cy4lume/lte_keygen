@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import csv
+import shutil
 from io import BufferedReader, BufferedWriter
 from typing import List
 
@@ -60,7 +61,7 @@ class PCapTransfer():
 			log.print_hex(data)
 
 			data = Data(data)
-
+			replaced = [False] * len(data)
 			for old, new in replacements:
 				log.print('Old:')
 				log.print_hex(old)
@@ -69,9 +70,25 @@ class PCapTransfer():
 				log.print_hex(new)
 
 				i = data.find(old)
-				log.print(i, i + len(old))
 				if i != -1:
 					data[i:i + len(old)] = new
+					replaced[i: i + len(old)] = [True] * len(old)
+
+			log.print('New data:')
+			for i in range(len(data)):
+				log.print(
+					f'{data[i]:02x}',
+					end=' ',
+					color=Color.GREEN if replaced[i] else Color.END
+				)
+				if (i + 1) % 4 == 0:
+					log.print('  ', end='')
+
+				if (i + 1) % 16 == 0:
+					log.print()
+
+			if len(data) % 16 != 0:
+				log.print()
 
 			self.oup.write(data)
 		else:
@@ -88,7 +105,7 @@ class PCapTransfer():
 	def __next__(self):
 		frame = self.cap.next()
 
-		if frame:
+		if frame:  # and self.frame_i_in + 1 < 14:
 
 			self.frame_i_in += 1
 			self.frame_len = parse_int(frame, 'length')
@@ -129,6 +146,7 @@ class PCapTransfer():
 class RNTIType(IntEnum):
 	RA = 2
 	C = 3
+	SI = 4
 
 
 @dataclass(frozen=True)
@@ -141,6 +159,7 @@ class RNTI:
 
 
 class UE:
+	keys: DerivedKeys
 
 	def __init__(self, rnti: int, credentials: List[SecurityManager]):
 		self.rnti = rnti
@@ -174,15 +193,21 @@ class UE:
 			self.parse_auth_req(mac_lte)
 
 		elif 'nas_eps_emm_toc' in fields:
-			self.parse_security_mode_command(mac_lte)
+			self.parse_nas_security_mode_command(mac_lte)
+
+		elif 'lte_rrc_securitymodecommand_element' in fields:
+			replacements = self.parse_as_security_mode_command(mac_lte)
 
 		elif 'nas_eps_ciphered_msg' in fields:  #Ciphered message
-			replacements = self.parse_ciphered(direction, mac_lte)
+			replacements = self.parse_ciphered_nas(mac_lte, direction)
 
 		elif 'nas_eps_security_header_type' in fields:
 			log.skip_tab(1)
 			log.print_tab('OTHER NAS-EPS')
 			log.print_tab('IGNORED!')
+
+		elif 'pdcp_lte_security_config' in fields:
+			replacements = self.parse_ciphered_rrc(mac_lte, direction)
 
 		elif 'sch_sdu' in fields and not any(['rlc' in field for field in fields]):
 			self.parse_mac_lte(mac_lte)
@@ -213,15 +238,18 @@ class UE:
 			log.print(f'MAC: {''.join(self.mac.hex())}')
 
 
-	def parse_security_mode_command(self, mac_lte):
-		log.print_tab('Security Mode command')
+	# TS 33 401
+	def parse_nas_security_mode_command(self, mac_lte):
+		log.print_tab('NAS SMC')
 		session = self.session
 
 		session.enc_alg_id = EEA(parse_int(mac_lte, 'nas_eps_emm_toc'))
 		session.int_alg_id = EIA(parse_int(mac_lte, 'nas_eps_emm_toi'))
 
-		log.print(f'message: {session.enc_alg_id.name}')
-		log.print(f'integrity: {session.int_alg_id.name}')
+		log.flush_tab()
+		log.print_tab('Ciphering:', f'{session.enc_alg_id.name}')
+		log.flush_tab()
+		log.print_tab('Integrity:', f'{session.int_alg_id.name}')
 
 		for mgr in self.credentials:
 			keys = mgr.derive_all(session)
@@ -233,11 +261,20 @@ class UE:
 				log.print('Found credentials!', color=Color.YELLOW)
 				self.keys = keys
 
-				log.print('k_asme:')
+				log.print('k asme:', color=Color.GREEN)
 				log.print_hex(keys.k_asme)
 
-				log.print('K NAS int:')
+				log.print('K NAS enc:', color=Color.GREEN)
+				log.print_hex(keys.k_nas_enc)
+
+				log.print('K NAS int:', color=Color.GREEN)
 				log.print_hex(keys.k_nas_int)
+
+				log.print('K RRC enc:', color=Color.GREEN)
+				log.print_hex(keys.k_rrc_enc)
+
+				log.print('K RRC int:', color=Color.GREEN)
+				log.print_hex(keys.k_rrc_int)
 
 				break
 
@@ -245,13 +282,24 @@ class UE:
 			log.print('Missing credentials!', color=Color.RED)
 
 
-	def parse_ciphered(self, direction, mac_lte):
-		log.print_tab("Ciphered")
+	# TS 33 401
+	def parse_as_security_mode_command(self, mac_lte):
+		log.print_tab('AS SMC')
+
+		old_pdu = parse_hex(mac_lte, 'rlc_lte_am_data')
+
+		new_pdu = Data(old_pdu)
+		# Set EEA0
+		new_pdu[-6] = 0
+
+		return [(old_pdu, new_pdu)]
+
+
+	def parse_ciphered_nas(self, mac_lte, direction):
+		log.print_tab("Ciphered NAS")
 
 		seq = parse_int(mac_lte, 'nas_eps_seq_no')
 		log.print_tab(f'SEQ: {seq:x}')
-
-		session = self.session
 
 		mac = parse_hex(mac_lte, 'nas_eps_msg_auth_code')
 		ciphered_message = parse_hex(mac_lte, 'nas_eps_ciphered_msg')
@@ -259,74 +307,72 @@ class UE:
 		log.print_tab(f'MAC: {mac.hex()}')
 		log.flush_tab()
 
-		log.print('Ciphered:')
-		log.print_hex(ciphered_message)
-
-		deciphered_message = None
-		if session.enc_alg_id == EEA.EEA0 and session.int_alg_id == EIA.EIA0:
-			deciphered_message = ciphered_message
-
-		elif self.keys:
-			key_enc = self.keys.k_nas_enc[16:]
-			key_int = self.keys.k_nas_int[16:]
-
-			bearer = 0
-
-			if session.enc_alg_id == EEA.EEA0:
-				deciphered_message = ciphered_message
-
-			elif session.enc_alg_id == EEA.EEA2:
-				deciphered_message = Data(liblte_security_encryption_eea2(
-					key_enc,
-					seq,
-					bearer,
-					direction,
-					ciphered_message,
-					len(ciphered_message) * 8
-				))
-			else:
-				log.print(f"TODO! implement {session.enc_alg_id.name}", color=Color.RED)
-				return
-
-			log.print('TODO: verify integrity', color=Color.RED)
-
-		##TODO: Get this working!!!
-		#if session.int_alg_id == EIA.EIA2:
-		#	if liblte_security_128_eia2(
-		#			key_int,
-		#			seq,
-		#			bearer,
-		#			direction,
-		#			ciphered_message,
-		#			len(ciphered_message) * 8,
-		#			mac
-		#	):
-		#		break
-		#	else:
-		#		deciphered_message = None
-		#		print('Failed integrity check!')
-		#else:
-		#	print(f'TODO! implement {session.int_alg_id.name}')
-		#	return
-		else:
-			print('Missing Auth Request!')
+		bearer = 0
+		deciphered_message = decipher(
+			ciphered_message,
+			self.session.enc_alg_id,
+			self.session.int_alg_id,
+			self.keys,
+			'nas',
+			seq,
+			bearer,
+			direction,
+		)
 
 		if not deciphered_message:
-			log.print('Could not decipher data!', color=Color.RED)
-			return
+			return None
 
-		log.print('Deciphered:')
-		log.print_hex(deciphered_message)
-
+		# --- Repack data ---
 		old_pdu = parse_hex(mac_lte, 'rlc_lte_am_data')
 
+		# Unaligned binary data
 		new_pdu = ''.join(f'{b:08b}' for b in old_pdu)
 
 		old = ''.join(f'{b:08b}' for b in ciphered_message)
 		new = ''.join(f'{b:08b}' for b in deciphered_message)
+		i = new_pdu.find(old) + 0
+
+		# --- Change security header to EEA0
+		new_pdu = new_pdu[:i - 48] + '0001' + new_pdu[i - 44:]
+
+		# --- Decipher payload
 		new_pdu = new_pdu.replace(old, new)
 
+		# Return to octets
 		new_pdu = bytes([int(new_pdu[i:i + 8], 2) for i in range(0, len(new_pdu), 8)])
+
+		return [(old_pdu, new_pdu)]
+
+
+	# TS 36 323
+	def parse_ciphered_rrc(self, mac_lte, direction):
+		log.print_tab('Ciphered RRC')
+
+		seq = parse_int(mac_lte, 'pdcp_lte_seq_num')
+		log.print_tab(f'SEQ: {seq}')
+
+		enc_alg = EEA(parse_int(mac_lte, 'pdcp_lte_security_config_ciphering'))
+		int_alg = EIA(parse_int(mac_lte, 'pdcp_lte_security_config_integrity'))
+
+		if enc_alg == EEA.EEA0:
+			bearer = 0
+		else:
+			bearer = parse_int(mac_lte, 'pdcp_lte_security_config_bearer')
+
+		old_pdu = parse_hex(mac_lte, 'rlc_lte_am_data')
+		ciphered_message = old_pdu[1:]
+
+		deciphered_message = decipher(
+			ciphered_message,
+			enc_alg,
+			int_alg,
+			self.keys,
+			'rrc',
+			seq, bearer, direction,
+		)
+
+		new_pdu = Data(old_pdu)
+		new_pdu[1:] = deciphered_message
 
 		return [(old_pdu, new_pdu)]
 
@@ -337,16 +383,88 @@ class UE:
 		log.print('TODO!')
 
 
+def decipher(
+		ciphered_message: Data,
+		eea: EEA, eia: EIA,
+		keys: DerivedKeys, kind: str,
+		seq: int, bearer: int, direction: int,
+) -> Data:
+	log.push()
+	log.print('Ciphered:')
+	log.print_hex(ciphered_message)
+
+	# --- Cipher ---
+	if eea == EEA.EEA0:
+		deciphered_message = ciphered_message
+
+	elif keys:
+		key_enc = keys.k_nas_enc if kind == 'nas' else keys.k_nas_enc
+		key_enc = key_enc[16:]
+
+		if eea == EEA.EEA2:
+			deciphered_message = Data(liblte_security_encryption_eea2(
+				key_enc,
+				seq,
+				bearer,
+				direction,
+				ciphered_message,
+				len(ciphered_message) * 8
+			))
+
+		else:
+			log.print(f"TODO! implement {eea.name}", color=Color.RED)
+			deciphered_message = None
+	else:
+		log.print('Cannot decipher. Missing Auth Request!', color=Color.RED)
+		deciphered_message = None
+
+	# --- Integrity ---
+	if eia == EIA.EIA0:
+		pass
+
+	elif keys:
+		key_int = keys.k_nas_int if kind == 'nas' else keys.k_nas_int
+		key_int = key_int[16:]
+
+		log.print('TODO: verify integrity', color=Color.RED)
+
+	##TODO: Get this working!!!
+	#if eia == EIA.EIA2:
+	#	if not liblte_security_128_eia2(
+	#			key_int,
+	#			seq,
+	#			bearer,
+	#			direction,
+	#			ciphered_message,
+	#			len(ciphered_message) * 8,
+	#			mac
+	#	):
+	#		deciphered_message = None
+	#		print('Failed integrity check!')
+	#else:
+	#	print(f'TODO! implement {session.int_alg_id.name}')
+
+	else:
+		log.print('Cannot verify Integrity. Missing Auth Request!', color=Color.RED)
+
+	if not deciphered_message:
+		log.print('Could not decipher data!', color=Color.RED)
+	else:
+		log.print('Deciphered:')
+		log.print_hex(deciphered_message)
+
+	log.pop()
+	return deciphered_message
+
 
 def decode(
 		trans: PCapTransfer,
 		credentials: List[SecurityManager],
-):
+) -> bool:
 	ues = {}
+	repeat = False
 
 	for frame in trans:
-		print()
-
 		mac_lte = frame['MAC-LTE']
 		number = int(frame.frame_info.number)
 
@@ -357,6 +475,8 @@ def decode(
 			log.print_tab('', 'Ignoring uplink')
 
 			trans.skip()
+			repeat = True
+
 			continue
 
 		log.print_tab(trans.frame_i_out)
@@ -366,6 +486,14 @@ def decode(
 			int(mac_lte.rnti)
 		)
 		log.print_tab(rnti)
+
+		if rnti.type == RNTIType.SI:
+			#log.print_tab('', 'Ignoring System Information')
+
+			trans.skip()
+			repeat = True
+
+			continue
 
 		replacements = None
 		if rnti.type == RNTIType.C:
@@ -394,9 +522,19 @@ def decode(
 				replacements = ues[rnti].parse(frame)
 				log.pop()
 
+		if replacements:
+			replacements = [(old, new) for old, new in replacements if old != new]
+
+			if len(replacements) > 0:
+				repeat = True
+
 		log.push()
 		trans.transfer(replacements)
 		log.pop()
+
+		log.print()
+
+	return repeat
 
 
 if __name__ == '__main__':
@@ -431,12 +569,33 @@ if __name__ == '__main__':
 	print(credentials)
 
 	# --- Parse PCAP file ---
-	trans = PCapTransfer(
-		args.input,
-		args.output
-	)
 
-	try:
-		decode(trans, credentials)
-	finally:
-		trans.close()
+	file_in = args.input
+	assert args.output.count('.') == 1
+
+	iteration = 1
+	while True:
+		file_out = args.output.split('.')[0] + '-' + str(iteration) + '.pcap'
+
+		log.push(f'Start iteration {iteration}')
+
+		trans = PCapTransfer(
+			file_in,
+			file_out
+		)
+
+		repeat = False
+		try:
+			repeat = decode(trans, credentials)
+		finally:
+			trans.close()
+
+		log.print(f'Stop iteration {iteration}')
+		log.pop()
+		log.print('--- --- --- --- ---')
+
+		if not repeat or iteration >= 10:
+			break
+
+		file_in = file_out
+		iteration += 1

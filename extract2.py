@@ -1,13 +1,16 @@
 import argparse
 import asyncio
 import csv
+import os
 import shutil
+import sys
 from io import BufferedReader, BufferedWriter
-from typing import List
+from typing import List, Callable
+import traceback
 
 import pyshark
 
-from Util import *
+from util import *
 from key import *
 
 
@@ -17,13 +20,51 @@ MNC = 0xff01
 log = ColorPrinter()
 
 
-def parse_hex(frame, param):
-	raw = str(getattr(frame, param)).removeprefix('0x')
-	return Data(bytes.fromhex(''.join(raw.split(':'))))
+def get_multiple(frame, param: str, function: Callable[[str], object]):
+	# Pyshark is fucking stupid with handling multiple same-name fields.
+	if isinstance(frame, pyshark.packet.layers.xml_layer.XmlLayer):
+
+		# Different naming schema, this is neither tested nor complete
+		replacements = {
+			'mac_lte_': 'mac-lte.',
+			'nas_eps_emm_': 'nas-eps.emm.',
+			'pdcp_lte_': 'pdcp-lte.',
+			'rlc_lte_am_': 'rlc-lte.am.',
+			'_': '-',
+		}
+
+		temp = param
+		for a, b in replacements.items():
+			temp = temp.replace(a, b)
+
+		# Retrieve, potentially, multiple values
+		values = []
+		for x in frame._all_fields.values():
+			if x.name == temp:
+				values = [k.get_default_value() for k in x.all_fields]
+				break
+
+		if len(values) == 0:
+			#log.print('Failed to translate parameter name', color=Color.MAGENTA)
+			pass
+		elif len(values) > 1:
+			log.print(temp, color=Color.MAGENTA)
+
+			log.print('Multiple values!', color=Color.MAGENTA)
+			log.print(values, color=Color.MAGENTA)
+			return [function(value) for value in values]
+
+	return function(getattr(frame, param))
 
 
-def parse_int(frame, param):
-	return int(getattr(frame, param))
+def parse_hex(frame, param) -> Data | list[Data]:
+	return get_multiple(frame, param, lambda raw: Data(bytes.fromhex(
+		''.join(str(raw).removeprefix('0x').split(':'))
+	)))
+
+
+def parse_int(frame, param) -> int | list[int]:
+	return get_multiple(frame, param, lambda v: int(v))
 
 
 class PCapTransfer():
@@ -61,24 +102,24 @@ class PCapTransfer():
 			log.print_hex(data)
 
 			data = Data(data)
-			replaced = [False] * len(data)
-			for old, new in replacements:
+			replaced = [0] * (len(data) + 1)
+			for i, (old, new) in enumerate(replacements):
 				log.print('Old:')
 				log.print_hex(old)
 
 				log.print('New:')
 				log.print_hex(new)
 
-				i = data.find(old)
-				if i != -1:
-					data[i:i + len(old)] = new
-					replaced[i: i + len(old)] = [True] * len(old)
+				j = data.find(old)
+				if j != -1:
+					data[j:j + len(old)] = new
+					replaced[j: j + len(old)] = [i+1] * len(old)
 
 			log.print('New data:')
 			for i in range(len(data)):
 				log.print(
 					f'{data[i]:02x}',
-					end=' ',
+					end=' ' if replaced[i] == replaced[i+1] else '|',
 					color=Color.GREEN if replaced[i] else Color.END
 				)
 				if (i + 1) % 4 == 0:
@@ -105,7 +146,7 @@ class PCapTransfer():
 	def __next__(self):
 		frame = self.cap.next()
 
-		if frame:  # and self.frame_i_in + 1 < 14:
+		if frame:# and self.frame_i_in + 1 < 33:
 
 			self.frame_i_in += 1
 			self.frame_len = parse_int(frame, 'length')
@@ -207,7 +248,8 @@ class UE:
 			log.print_tab('IGNORED!')
 
 		elif 'pdcp_lte_security_config' in fields:
-			replacements = self.parse_ciphered_rrc(mac_lte, direction)
+			if self.rrc_eea and self.rrc_eea != EEA.EEA0:
+				replacements = self.parse_ciphered_rrc(mac_lte, direction)
 
 		elif 'sch_sdu' in fields and not any(['rlc' in field for field in fields]):
 			self.parse_mac_lte(mac_lte)
@@ -232,10 +274,11 @@ class UE:
 			self.amf = parse_hex(mac_lte, 'gsm_a_dtap_autn_amf')
 			self.mac = parse_hex(mac_lte, 'gsm_a_dtap_autn_mac')
 
-			log.print(f'sqn^Ak: {''.join(self.session.sqn_xor_ak.hex())}')
-			log.print(f'RAND: {''.join(self.session.rand.hex())}')
-			log.print(f'AMF: {''.join(self.amf.hex())}')
-			log.print(f'MAC: {''.join(self.mac.hex())}')
+			log.flush_tab()
+			log.println_tab('sqn^Ak:', f'{''.join(self.session.sqn_xor_ak.hex())}')
+			log.println_tab('RAND:', f'{''.join(self.session.rand.hex())}')
+			log.println_tab('AMF:', f'{''.join(self.amf.hex())}')
+			log.println_tab('MAC:', f'{''.join(self.mac.hex())}')
 
 
 	# TS 33 401
@@ -258,7 +301,7 @@ class UE:
 			xmac = mgr.milenage.f1(session.rand, sqn, self.amf)
 
 			if xmac == self.mac:
-				log.print('Found credentials!', color=Color.YELLOW)
+				log.print('Found credentials!', color=Color.MAGENTA)
 				self.keys = keys
 
 				log.print('k asme:', color=Color.GREEN)
@@ -286,6 +329,13 @@ class UE:
 	def parse_as_security_mode_command(self, mac_lte):
 		log.print_tab('AS SMC')
 
+		self.rrc_eea = EEA(parse_int(mac_lte, 'lte_rrc_cipheringalgorithm'))
+		self.rrc_eia = EIA(parse_int(mac_lte, 'lte_rrc_integrityprotalgorithm'))
+
+		log.flush_tab()
+		log.println_tab('RRC EEA:', self.rrc_eea)
+		log.println_tab('RRC EIA:', self.rrc_eia)
+
 		old_pdu = parse_hex(mac_lte, 'rlc_lte_am_data')
 
 		new_pdu = Data(old_pdu)
@@ -307,23 +357,30 @@ class UE:
 		log.print_tab(f'MAC: {mac.hex()}')
 		log.flush_tab()
 
+		if any(isinstance(p, list) for p in [seq, mac, ciphered_message]):
+			log.print('TODO! Handle multiple ciphered NAS messages')
+
+		old_pdu = parse_hex(mac_lte, 'rlc_lte_am_data')
+		if isinstance(old_pdu, list):
+			for pdu in old_pdu:
+				tmp = ''.join(f'{b:08b}' for b in ciphered_message)
+				if tmp in ''.join(f'{b:08b}' for b in pdu):
+					old_pdu = pdu
+					break
+
 		bearer = 0
-		deciphered_message = decipher(
-			ciphered_message,
+		deciphered_message = decipher_nas(
+			ciphered_message, mac,
 			self.session.enc_alg_id,
 			self.session.int_alg_id,
 			self.keys,
-			'nas',
-			seq,
-			bearer,
-			direction,
+			seq, bearer, direction,
 		)
 
 		if not deciphered_message:
 			return None
 
 		# --- Repack data ---
-		old_pdu = parse_hex(mac_lte, 'rlc_lte_am_data')
 
 		# Unaligned binary data
 		new_pdu = ''.join(f'{b:08b}' for b in old_pdu)
@@ -349,32 +406,39 @@ class UE:
 		log.print_tab('Ciphered RRC')
 
 		seq = parse_int(mac_lte, 'pdcp_lte_seq_num')
-		log.print_tab(f'SEQ: {seq}')
+		log.println_tab(f'SEQ: {seq}')
 
-		enc_alg = EEA(parse_int(mac_lte, 'pdcp_lte_security_config_ciphering'))
-		int_alg = EIA(parse_int(mac_lte, 'pdcp_lte_security_config_integrity'))
-
-		if enc_alg == EEA.EEA0:
-			bearer = 0
-		else:
+		if 'pdcp_lte_security_config_bearer' in mac_lte.field_names:
 			bearer = parse_int(mac_lte, 'pdcp_lte_security_config_bearer')
+		else:
+			log.print('TODO! Brute force all bearers', color=Color.RED)
+			bearer = 0
+		log.println_tab('Bearer:', bearer)
 
 		old_pdu = parse_hex(mac_lte, 'rlc_lte_am_data')
-		ciphered_message = old_pdu[1:]
 
-		deciphered_message = decipher(
-			ciphered_message,
-			enc_alg,
-			int_alg,
-			self.keys,
-			'rrc',
-			seq, bearer, direction,
-		)
+		if not isinstance(seq, list):
+			seq = [seq]
+			old_pdu = [old_pdu]
 
-		new_pdu = Data(old_pdu)
-		new_pdu[1:] = deciphered_message
+		replacements = []
+		for seq, old_pdu in zip(seq, old_pdu):
+			ciphered_message = old_pdu[1:]
 
-		return [(old_pdu, new_pdu)]
+			deciphered_message = decipher_rrc(
+				ciphered_message,
+				self.rrc_eea,
+				self.rrc_eia,
+				self.keys,
+				seq, bearer, direction,
+			)
+
+			new_pdu = Data(old_pdu)
+			new_pdu[1:] = deciphered_message
+
+			replacements.append((old_pdu, new_pdu))
+
+		return replacements
 
 
 	def parse_mac_lte(self, mac_lte):
@@ -383,10 +447,12 @@ class UE:
 		log.print('TODO!')
 
 
-def decipher(
+# TS 33 401
+def decipher_nas(
 		ciphered_message: Data,
+		mac: Data,
 		eea: EEA, eia: EIA,
-		keys: DerivedKeys, kind: str,
+		keys: DerivedKeys,
 		seq: int, bearer: int, direction: int,
 ) -> Data:
 	log.push()
@@ -398,7 +464,7 @@ def decipher(
 		deciphered_message = ciphered_message
 
 	elif keys:
-		key_enc = keys.k_nas_enc if kind == 'nas' else keys.k_nas_enc
+		key_enc = keys.k_nas_enc
 		key_enc = key_enc[16:]
 
 		if eea == EEA.EEA2:
@@ -419,30 +485,112 @@ def decipher(
 		deciphered_message = None
 
 	# --- Integrity ---
-	if eia == EIA.EIA0:
-		pass
+	if eia != EIA.EIA0 and keys:
+		#TODO!
+		log.print("TODO. Implement Integrity verification!", color=Color.RED)
+
+	#		key_int = keys.k_nas_int
+	#		key_int = key_int[16:]
+	#
+	#		msg = deciphered_message
+	#		#msg.insert(0, seq)
+	#
+	#		log.print('Message:')
+	#		log.print_hex(msg)
+	#
+	#		log.print('MAC:')
+	#		log.print_hex(mac)
+	#		if eia == EIA.EIA2:
+	#			if not liblte_security_128_eia2(
+	#					key_int,
+	#					seq,
+	#					bearer,
+	#					direction,
+	#					msg,
+	#					len(msg) * 8,
+	#					mac
+	#			):
+	#				deciphered_message = None
+	#				log.print('Failed integrity check!', color=Color.RED)
+	#		else:
+	#			log.print(f'TODO! implement {session.int_alg_id.name}')
+
+	else:
+		log.print('Cannot verify Integrity. Missing Auth Request!', color=Color.RED)
+
+	if not deciphered_message:
+		log.print('Could not decipher data!', color=Color.RED)
+	else:
+		log.print('Deciphered:')
+		log.print_hex(deciphered_message)
+
+	log.pop()
+	return deciphered_message
+
+
+def decipher_rrc(
+		ciphered_message: Data,
+		eea: EEA, eia: EIA,
+		keys: DerivedKeys,
+		seq: int, bearer: int, direction: int,
+) -> Data:
+	log.push('Ciphered:')
+	log.print_hex(ciphered_message)
+
+	# --- Cipher ---
+	if eea == EEA.EEA0:
+		deciphered_message = ciphered_message
 
 	elif keys:
-		key_int = keys.k_nas_int if kind == 'nas' else keys.k_nas_int
+		key_enc = keys.k_rrc_enc
+		key_enc = key_enc[16:]
+
+		if eea == EEA.EEA2:
+			deciphered_message = Data(liblte_security_encryption_eea2(
+				key_enc,
+				seq,
+				bearer,
+				direction,
+				ciphered_message,
+				len(ciphered_message) * 8
+			))
+
+		else:
+			log.print(f"TODO! implement {eea.name}", color=Color.RED)
+			deciphered_message = None
+	else:
+		log.print('Cannot decipher. Missing Auth Request!', color=Color.RED)
+		deciphered_message = None
+
+	# --- Integrity ---
+
+	if eia != EIA.EIA0 and keys:
+		key_int = keys.k_rrc_int
 		key_int = key_int[16:]
 
-		log.print('TODO: verify integrity', color=Color.RED)
+		mac = deciphered_message[-4:]
+		msg = deciphered_message[:-4]
+		msg.insert(0, seq)
 
-	##TODO: Get this working!!!
-	#if eia == EIA.EIA2:
-	#	if not liblte_security_128_eia2(
-	#			key_int,
-	#			seq,
-	#			bearer,
-	#			direction,
-	#			ciphered_message,
-	#			len(ciphered_message) * 8,
-	#			mac
-	#	):
-	#		deciphered_message = None
-	#		print('Failed integrity check!')
-	#else:
-	#	print(f'TODO! implement {session.int_alg_id.name}')
+		log.print('Message:')
+		log.print_hex(msg)
+
+		log.print('MAC:')
+		log.print_hex(mac)
+		if eia == EIA.EIA2:
+			if not liblte_security_128_eia2(
+					key_int,
+					seq,
+					bearer,
+					direction,
+					msg,
+					len(msg) * 8,
+					mac
+			):
+				deciphered_message = None
+				log.print('Failed integrity check!', color=Color.RED)
+		else:
+			log.print(f'TODO! implement {session.int_alg_id.name}')
 
 	else:
 		log.print('Cannot verify Integrity. Missing Auth Request!', color=Color.RED)
@@ -465,6 +613,8 @@ def decode(
 	repeat = False
 
 	for frame in trans:
+		log.print()
+
 		mac_lte = frame['MAC-LTE']
 		number = int(frame.frame_info.number)
 
@@ -475,7 +625,6 @@ def decode(
 			log.print_tab('', 'Ignoring uplink')
 
 			trans.skip()
-			repeat = True
 
 			continue
 
@@ -488,12 +637,19 @@ def decode(
 		log.print_tab(rnti)
 
 		if rnti.type == RNTIType.SI:
-			#log.print_tab('', 'Ignoring System Information')
+			log.print_tab('', 'Ignoring System Information')
 
 			trans.skip()
-			repeat = True
 
 			continue
+
+		if 'rlc_lte_sequence_analysis_ok' in mac_lte.field_names:
+			if getattr(mac_lte, 'rlc_lte_sequence_analysis_ok') == 'False':
+				log.print('Ignoring Duplicate frame!', color=Color.BLUE)
+
+				trans.skip()
+
+				continue
 
 		replacements = None
 		if rnti.type == RNTIType.C:
@@ -518,9 +674,16 @@ def decode(
 			if rnti not in ues:
 				log.print_tab('Unknown UE, not parsing frame!')
 			else:
-				log.push()
-				replacements = ues[rnti].parse(frame)
-				log.pop()
+				try:
+					log.push()
+					replacements = ues[rnti].parse(frame)
+				except Exception:
+					print('\n')
+					print(traceback.format_exc(), end='')
+					log.print('Could not parse frame!', color=Color.RED)
+					replacements = None
+				finally:
+					log.pop()
 
 		if replacements:
 			replacements = [(old, new) for old, new in replacements if old != new]
@@ -532,13 +695,17 @@ def decode(
 		trans.transfer(replacements)
 		log.pop()
 
-		log.print()
-
+	log.print()
 	return repeat
 
 
 if __name__ == '__main__':
 	#((_ws.col.protocol != "LTE RRC DL_SCH") && !(_ws.col.protocol == "MAC-LTE")) && (mac-lte.rnti == 61)
+	#tmp = open('out/log.log', 'w')
+	#sys.stdout = tmp
+	#tmp = open('out/log.log', 'r')
+	#print(tmp.read())
+	#exit(1)
 
 	# --- Parse Input Args
 	parser = argparse.ArgumentParser(
@@ -592,9 +759,17 @@ if __name__ == '__main__':
 
 		log.print(f'Stop iteration {iteration}')
 		log.pop()
-		log.print('--- --- --- --- ---')
+		log.print('--- --- --- --- --- --- --- --- --- ---')
 
-		if not repeat or iteration >= 10:
+		if not repeat:
+			log.print(f'No changes made, deleting \'{file_out}\'')
+			try:
+				os.remove(file_out)
+			finally:
+				break
+
+		if iteration > 10:
+			log.print('Iteration limit!')
 			break
 
 		file_in = file_out

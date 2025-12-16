@@ -11,7 +11,7 @@ from rlc import *
 import pyshark
 from smspdudecoder.codecs import GSM, UCS2
 
-from Util import *
+from util import *
 from key import *
 
 

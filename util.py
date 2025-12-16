@@ -57,10 +57,8 @@ class ColorPrinter:
 		elif not isinstance(msg, str):
 			msg = str(msg)
 
-		print(msg, end=end)
+		print(msg + Color.END, end=end)
 		self.newline = end == '\n' or (msg and msg[-1] == '\n')
-
-		print(Color.END, end='')
 
 	def print_hex(self, msg):
 		temp = msg.hex()
@@ -109,6 +107,10 @@ class ColorPrinter:
 	def skip_tab(self, n):
 		for i in range(n):
 			self.print_tab('')
+
+	def println_tab(self, *msg):
+		self.print_tab(*msg)
+		self.flush_tab()
 
 	def flush_tab(self):
 		if (self.i > 0):

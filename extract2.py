@@ -14,8 +14,8 @@ from util import *
 from key import *
 
 
-MCC = 0xf001
-MNC = 0xff01
+MCC = 0x001
+MNC = 0x01
 
 log = ColorPrinter()
 
@@ -275,10 +275,10 @@ class UE:
 			self.mac = parse_hex(mac_lte, 'gsm_a_dtap_autn_mac')
 
 			log.flush_tab()
-			log.println_tab('sqn^Ak:', f'{''.join(self.session.sqn_xor_ak.hex())}')
-			log.println_tab('RAND:', f'{''.join(self.session.rand.hex())}')
-			log.println_tab('AMF:', f'{''.join(self.amf.hex())}')
-			log.println_tab('MAC:', f'{''.join(self.mac.hex())}')
+			log.println_tab('sqn^Ak:', f'{self.session.sqn_xor_ak.hex()}')
+			log.println_tab('RAND:', f'{self.session.rand.hex()}')
+			log.println_tab('AMF:', f'{self.amf.hex()}')
+			log.println_tab('MAC:', f'{self.mac.hex()}')
 
 
 	# TS 33 401
@@ -432,6 +432,9 @@ class UE:
 				self.keys,
 				seq, bearer, direction,
 			)
+
+			if not deciphered_message:
+				continue
 
 			new_pdu = Data(old_pdu)
 			new_pdu[1:] = deciphered_message

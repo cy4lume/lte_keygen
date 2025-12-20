@@ -12,10 +12,11 @@ import pyshark
 
 from util import *
 from key import *
+from rlc import *
 
 
-MCC = 0x001
-MNC = 0x01
+MCC = 0xf001
+MNC = 0xff01
 
 log = ColorPrinter()
 
@@ -198,6 +199,14 @@ class RNTI:
 	def __str__(self):
 		return f'{self.type.name:>2}-{self.rnti}'
 
+@dataclass(slots=True)
+class LCIDConfig:
+	lcid: int
+	eea: EEA
+	key: bytes
+	bearer: int
+	bit_len: int
+	filename: str
 
 class UE:
 	keys: DerivedKeys
@@ -217,6 +226,14 @@ class UE:
 			enc_alg_id=None,
 			int_alg_id=None,
 		)
+
+		# lcid context -> 1(rrcenc)/3(upenc).../4/5 UPenc / 1/3/4 -> AM->12bit 5->UM->7bit
+		self.lcid = {
+			1: LteRlcAmReassembler(LCIDConfig(lcid=1, key="", eea=EEA.EEA0, bearer=0, bit_len=12, filename="lcid1.pcap")),
+			3: LteRlcAmReassembler(LCIDConfig(lcid=3, key="", eea=EEA.EEA0, bearer=1, bit_len=12, filename="lcid3.pcap")),
+			4: LteRlcAmReassembler(LCIDConfig(lcid=4, key="", eea=EEA.EEA0, bearer=6, bit_len=12, filename="lcid4.pcap")),
+			5: LteRlcUm5BitReassembler(LCIDConfig(lcid=5, key="", eea=EEA.EEA0, bearer=7, bit_len=7, filename="lcid5.pcap")),
+		}
 
 
 	def parse(self, frame):
@@ -297,6 +314,14 @@ class UE:
 		for mgr in self.credentials:
 			keys = mgr.derive_all(session)
 
+			self.lcid[1].config.key = keys.k_rrc_enc
+			self.lcid[3].config.key = keys.k_up_enc
+			self.lcid[4].config.key = keys.k_up_enc
+			self.lcid[5].config.key = keys.k_up_enc
+
+			for i in (1, 3, 4, 5):
+				self.lcid[i].config.eea = EEA.EEA2
+
 			sqn = bytes(x ^ y for x, y in zip(session.sqn_xor_ak, keys.ak))
 			xmac = mgr.milenage.f1(session.rand, sqn, self.amf)
 
@@ -304,7 +329,7 @@ class UE:
 				log.print('Found credentials!', color=Color.MAGENTA)
 				self.keys = keys
 
-				log.print('k asme:', color=Color.GREEN)
+				log.print('K asme:', color=Color.GREEN)
 				log.print_hex(keys.k_asme)
 
 				log.print('K NAS enc:', color=Color.GREEN)
@@ -318,6 +343,9 @@ class UE:
 
 				log.print('K RRC int:', color=Color.GREEN)
 				log.print_hex(keys.k_rrc_int)
+
+				log.print('K UP enc:', color=Color.GREEN)
+				log.print_hex(keys.k_up_enc)
 
 				break
 
@@ -445,9 +473,71 @@ class UE:
 
 
 	def parse_mac_lte(self, mac_lte):
-		log.print_tab("MAC-LTE")
+		if self.rnti != 61:
+			pass
+		lcid = int(getattr(mac_lte, 'dlsch_lcid'), base=16)
+		log.print_tab(lcid)
 
-		log.print('TODO!')
+		log.print_tab('MAC-LTE')
+
+		# System frame number, subframe number
+		framenum = parse_int(mac_lte, 'sfn')
+		subframe = parse_int(mac_lte, 'subframe')
+
+		log.print_tab(f'Frame: {framenum}-{subframe}')
+		log.print_tab(f'LCID: {lcid}')
+
+		log.flush_tab()
+
+		#https://stackoverflow.com/a/51522145
+		headers = next(v.all_fields for v in mac_lte._all_fields.values() if v.name == 'mac-lte.sch.subheader')
+		sdus = next(v.all_fields for v in mac_lte._all_fields.values() if v.name == 'mac-lte.sch.sdu')
+
+		headers = [bytes.fromhex(v.raw_value) for v in headers]
+		sdus = [bytes.fromhex(v.raw_value) for v in sdus]
+		
+		if True:
+			s_i = 0
+			for header in headers:
+				lcid = header[0] & 0b00011111
+				print(f'{header.hex()} ({lcid:05b}):')
+				if lcid == 0b00011111:
+					print('Padding!')
+					continue
+				elif lcid == 0b00011101:
+					print('Timing Advance!')
+					continue
+				elif 1 <= lcid <= 16:
+					print(f'Logical channel {lcid}')
+					pass
+				else:
+					print(Color.RED + 'TODO!, unkown lcid' + Color.END)
+					continue
+				
+				sdu = sdus[s_i]
+				s_i += 1
+
+				if lcid not in self.lcid:
+					pass
+				else:
+					self.lcid[lcid].process_rlc_pdu(sdu)
+
+			"""for (header, sdu) in zip_longest(headers, sdus):
+				if not sdu:
+					sdu = bytes()
+
+				lcid = header[0] & 0b00011111
+
+				print(f'{header.hex()} ({lcid:05b}):')
+
+				if lcid == 0b00011111:
+					print('Padding!')
+				elif 1 <= lcid <= 10:
+					print(f'Logical channel {lcid}')
+				else:
+					print(Color.RED + 'TODO!, unkown lcid' + Color.END)
+
+				print(sdu)"""
 
 
 # TS 33 401

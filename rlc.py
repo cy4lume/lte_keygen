@@ -1,5 +1,7 @@
 import struct
 import time
+from extract2 import LCIDConfig, EEA
+from key import *
 
 # --- ---
 class SimplePcapWriter:
@@ -59,8 +61,8 @@ class SimplePcapWriter:
         self.f.close()
 
 class LteRlcAmReassembler:
-    def __init__(self, output_pcap):
-        self.pcap_writer = SimplePcapWriter(output_pcap)
+    def __init__(self, lcid_config: LCIDConfig):
+        self.pcap_writer = SimplePcapWriter(lcid_config.filename)
         
         # AM Constants (10-bit SN)
         self.SN_MODULUS = 1024
@@ -75,6 +77,8 @@ class LteRlcAmReassembler:
         
         # SDU Assembly Buffer (Partial SDU)
         self.sdu_buffer = []
+
+        self.config = lcid_config
 
     def process_rlc_pdu(self, raw_bytes):
         """
@@ -321,7 +325,7 @@ class LteRlcAmReassembler:
         if len(data) < 22:
             return # Minimum IP header length
 
-        print("SDU!", data)
+        print("SDU!", data.hex())
         sdu_length = 2
         
         #for i in range(1, 4):
@@ -329,8 +333,29 @@ class LteRlcAmReassembler:
         #        sdu_length = i
         #        break
 
+        pdu = data[:sdu_length]
         data = data[sdu_length:]
+
+        x = int.from_bytes(pdu, byteorder="big", signed=False)
+        cnt = x & 0xFFF # 12-bit assumed
+        print(f"cnt: {cnt}")
+        print(f"bearer: {self.config.bearer}")
         
+        # decrypt
+        if self.config.eea == EEA.EEA0:
+            assert(0)
+        elif self.config.eea == EEA.EEA2:
+            data = liblte_security_encryption_eea2(
+                self.config.key[16:],
+                cnt,
+                self.config.bearer-1,
+                1,
+                data,
+                len(data) * 8
+            )
+
+        print("Deciphered SDU!", data.hex())
+
         # IP Version Check (First nibble)
         version = (data[0] >> 4)
         eth_type = b'\x08\x00' if version == 4 else b'\x86\xdd' if version == 6 else b'\x00\x00'
@@ -353,8 +378,8 @@ class LteRlcUm5BitReassembler:
     """
     LTE RLC UM Reassembler for 5-bit Sequence Number (VoLTE)
     """
-    def __init__(self, output_pcap):
-        self.pcap_writer = SimplePcapWriter(output_pcap)
+    def __init__(self, lcid_config: LCIDConfig):
+        self.pcap_writer = SimplePcapWriter(lcid_config.filename)
         
         # UM 5-bit constants
         self.SN_MODULUS = 32       # 2^5
@@ -370,6 +395,8 @@ class LteRlcUm5BitReassembler:
         # SDU Assembly Buffer (fragmented chunks)
         # VoLTE often involves small packets, so simple byte concatenation is used instead of a list
         self.assembly_buffer = b"" 
+        
+        self.config = lcid_config
 
     def process_rlc_pdu(self, raw_bytes):
         """

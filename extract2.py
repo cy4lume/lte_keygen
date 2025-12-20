@@ -14,7 +14,7 @@ from util import *
 from key import *
 from rlc import *
 
-
+# TODO!: parse this by UE
 MCC = 0xf001
 MNC = 0xff01
 
@@ -120,7 +120,7 @@ class PCapTransfer():
 			for i in range(len(data)):
 				log.print(
 					f'{data[i]:02x}',
-					end=' ' if replaced[i] == replaced[i+1] else '|',
+					end=' ', #if replaced[i] == replaced[i+1] else '|',
 					color=Color.GREEN if replaced[i] else Color.END
 				)
 				if (i + 1) % 4 == 0:
@@ -207,6 +207,8 @@ class LCIDConfig:
 	bearer: int
 	bit_len: int
 	filename: str
+	hfn: int
+	prev_cnt: int
 
 class UE:
 	keys: DerivedKeys
@@ -229,10 +231,10 @@ class UE:
 
 		# lcid context -> 1(rrcenc)/3(upenc).../4/5 UPenc / 1/3/4 -> AM->12bit 5->UM->7bit
 		self.lcid = {
-			1: LteRlcAmReassembler(LCIDConfig(lcid=1, key="", eea=EEA.EEA0, bearer=0, bit_len=12, filename="lcid1.pcap")),
-			3: LteRlcAmReassembler(LCIDConfig(lcid=3, key="", eea=EEA.EEA0, bearer=1, bit_len=12, filename="lcid3.pcap")),
-			4: LteRlcAmReassembler(LCIDConfig(lcid=4, key="", eea=EEA.EEA0, bearer=6, bit_len=12, filename="lcid4.pcap")),
-			5: LteRlcUm5BitReassembler(LCIDConfig(lcid=5, key="", eea=EEA.EEA0, bearer=7, bit_len=7, filename="lcid5.pcap")),
+			1: LteRlcAmReassembler(LCIDConfig(lcid=1, key="", eea=EEA.EEA0, bearer=0, bit_len=12, filename="lcid1.pcap", hfn=0, prev_cnt=-1)),
+			3: LteRlcAmReassembler(LCIDConfig(lcid=3, key="", eea=EEA.EEA0, bearer=1, bit_len=12, filename="lcid3.pcap", hfn=0, prev_cnt=-1)),
+			4: LteRlcAmReassembler(LCIDConfig(lcid=4, key="", eea=EEA.EEA0, bearer=2, bit_len=12, filename="lcid4.pcap", hfn=0, prev_cnt=-1)),
+			5: LteRlcUm5BitReassembler(LCIDConfig(lcid=5, key="", eea=EEA.EEA0, bearer=3, bit_len=7, filename="lcid5.pcap", hfn=0, prev_cnt=-1)),
 		}
 
 
@@ -320,7 +322,7 @@ class UE:
 			self.lcid[5].config.key = keys.k_up_enc
 
 			for i in (1, 3, 4, 5):
-				self.lcid[i].config.eea = EEA.EEA2
+				self.lcid[i].config.eea = self.session.enc_alg_id
 
 			sqn = bytes(x ^ y for x, y in zip(session.sqn_xor_ak, keys.ak))
 			xmac = mgr.milenage.f1(session.rand, sqn, self.amf)
@@ -473,8 +475,6 @@ class UE:
 
 
 	def parse_mac_lte(self, mac_lte):
-		if self.rnti != 61:
-			pass
 		lcid = int(getattr(mac_lte, 'dlsch_lcid'), base=16)
 		log.print_tab(lcid)
 

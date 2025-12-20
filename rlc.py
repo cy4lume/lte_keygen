@@ -338,21 +338,46 @@ class LteRlcAmReassembler:
 
         x = int.from_bytes(pdu, byteorder="big", signed=False)
         cnt = x & 0xFFF # 12-bit assumed
+
+        if self.config.prev_cnt - cnt > 2048:
+            self.config.hfn += 1
+
+        self.config.prev_cnt = cnt
+
         print(f"cnt: {cnt}")
         print(f"bearer: {self.config.bearer}")
         
         # decrypt
         if self.config.eea == EEA.EEA0:
-            assert(0)
+            pass
         elif self.config.eea == EEA.EEA2:
-            data = liblte_security_encryption_eea2(
-                self.config.key[16:],
-                cnt,
-                self.config.bearer-1,
-                1,
-                data,
-                len(data) * 8
-            )
+            if self.config.bearer != -1:
+                data = liblte_security_encryption_eea2(
+                    self.config.key[16:],
+                    128 * self.config.hfn + cnt,
+                    self.config.bearer-1,
+                    1,
+                    data,
+                    len(data) * 8
+                )
+            else:
+                bearer_candidates = []
+
+                for candidate in range(1, 32):
+                    data2 = liblte_security_encryption_eea2(
+                        self.config.key[16:],
+                        cnt,
+                        candidate-1,
+                        1,
+                        data,
+                        len(data) * 8
+                    )
+
+                    if (data2[0] >> 4) == 0x6 or (data2[0] == 0x45 and data2[1] == 0):
+                        print("yayyy")
+                        bearer_candidates.append(candidate)
+                        print(f"This may contain deciphered message with bearer: {candidate}")
+                        print(f"May be deciphered: {data2.hex()}")
 
         print("Deciphered SDU!", data.hex())
 
@@ -381,7 +406,7 @@ class LteRlcUm5BitReassembler:
     def __init__(self, lcid_config: LCIDConfig):
         self.pcap_writer = SimplePcapWriter(lcid_config.filename)
         
-        # UM 5-bit constants
+        # UM 7-bit constants
         self.SN_MODULUS = 32       # 2^5
         self.WINDOW_SIZE = 16      # 2^5 / 2
         
@@ -596,33 +621,80 @@ class LteRlcUm5BitReassembler:
             self._write_ip_packet(self.assembly_buffer)
             self.assembly_buffer = b""
 
-    def _write_ip_packet(self, sdu_data):
+    def _write_ip_packet(self, data):
         """
-        Identifies if it's an IP packet, attaches Ethernet header, and saves to PCAP
+        Checks if it's an IP packet, then wraps it in an Ethernet frame and saves
         """
-        if len(sdu_data) <= 1: return
+        if len(data) < 22:
+            return # Minimum IP header length
 
-        print("SDU!", sdu_data)
+        print("SDU!", data.hex())
         sdu_length = 1
-
-        sdu_data = sdu_data[sdu_length:]
         
-        # IP Version Check (First Nibble)
-        ip_ver = (sdu_data[0] >> 4) & 0xF
-        eth_type = b'\x08\x00' # Default IPv4
-        
-        if ip_ver == 6:
-            eth_type = b'\x86\xdd'
-        elif ip_ver != 4:
-            # ROHC Compressed packet or non-IP (VoLTE often uses ROHC)
-            # To view in PCAP, EtherType may need adjustment, or 
-            # 'User DLT' settings in Wireshark may be required.
-            # Here, it is recorded assuming IPv4.
-            pass 
+        #for i in range(1, 4):
+        #    if (data[i] >> 4) == 4 or (data[i] >> 4) == 6:
+        #        sdu_length = i
+        #        break
 
-        # Dummy MACs
-        eth_header = b'\x00\x02\x00\x00\x00\x02' + b'\x00\x02\x00\x00\x00\x01' + eth_type
-        self.pcap_writer.write_packet(eth_header + sdu_data)
+        pdu = data[:sdu_length]
+        data = data[sdu_length:]
+
+        cnt = int.from_bytes(pdu) & 0x7f # 7-bit assumed
+
+        if self.config.prev_cnt - cnt > 64:
+            self.config.hfn += 1
+        
+        self.config.prev_cnt = cnt
+
+        print(f"cnt: {128 * self.config.hfn + cnt} ({cnt})")
+        print(f"bearer: {self.config.bearer}")
+        
+        # decrypt
+        if self.config.eea == EEA.EEA0:
+            pass
+        elif self.config.eea == EEA.EEA2:
+            if self.config.bearer != -1:
+                data = liblte_security_encryption_eea2(
+                    self.config.key[16:],
+                    128 * self.config.hfn + cnt,
+                    self.config.bearer-1,
+                    1,
+                    data,
+                    len(data) * 8
+                )
+            else:
+                bearer_candidates = []
+
+                for candidate in range(1, 32):
+                    data2 = liblte_security_encryption_eea2(
+                        self.config.key[16:],
+                        cnt,
+                        candidate-1,
+                        1,
+                        data,
+                        len(data) * 8
+                    )
+
+                    if (data2[0] >> 4) == 0x6 or (data2[0] == 0x45 and data2[1] == 0):
+                        print("yayyy")
+                        bearer_candidates.append(candidate)
+                        print(f"This may contain deciphered message with bearer: {candidate}")
+                        print(f"May be deciphered: {data2.hex()}")
+
+        print("Deciphered SDU!", data.hex())
+
+        # IP Version Check (First nibble)
+        version = (data[0] >> 4)
+        eth_type = b'\x08\x00' if version == 4 else b'\x86\xdd' if version == 6 else b'\x00\x00'
+
+        print("ETH", eth_type)
+
+        if eth_type:
+            # Dummy MAC Address
+            eth_header = b'\x00\x02\x00\x00\x00\x02' + b'\x00\x02\x00\x00\x00\x01' + eth_type
+            self.pcap_writer.write_packet(eth_header + data)
+            #self.pcap_writer.f.close()
+            #assert(0)
 
     def close(self):
         self.pcap_writer.close()

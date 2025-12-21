@@ -120,7 +120,7 @@ class PCapTransfer():
 			for i in range(len(data)):
 				log.print(
 					f'{data[i]:02x}',
-					end=' ', #if replaced[i] == replaced[i+1] else '|',
+					end=' ', # if replaced[i] == replaced[i+1] else '|',
 					color=Color.GREEN if replaced[i] else Color.END
 				)
 				if (i + 1) % 4 == 0:
@@ -209,6 +209,7 @@ class LCIDConfig:
 	filename: str
 	hfn: int
 	prev_cnt: int
+	aux: dict
 
 class UE:
 	keys: DerivedKeys
@@ -231,10 +232,11 @@ class UE:
 
 		# lcid context -> 1(rrcenc)/3(upenc).../4/5 UPenc / 1/3/4 -> AM->12bit 5->UM->7bit
 		self.lcid = {
-			1: LteRlcAmReassembler(LCIDConfig(lcid=1, key="", eea=EEA.EEA0, bearer=0, bit_len=12, filename="lcid1.pcap", hfn=0, prev_cnt=-1)),
-			3: LteRlcAmReassembler(LCIDConfig(lcid=3, key="", eea=EEA.EEA0, bearer=1, bit_len=12, filename="lcid3.pcap", hfn=0, prev_cnt=-1)),
-			4: LteRlcAmReassembler(LCIDConfig(lcid=4, key="", eea=EEA.EEA0, bearer=2, bit_len=12, filename="lcid4.pcap", hfn=0, prev_cnt=-1)),
-			5: LteRlcUm5BitReassembler(LCIDConfig(lcid=5, key="", eea=EEA.EEA0, bearer=3, bit_len=7, filename="lcid5.pcap", hfn=0, prev_cnt=-1)),
+			1: LteRlcNasReassembler(LCIDConfig(lcid=1, key="", eea=EEA.EEA0, bearer=1, bit_len=7, filename=f"rnti{rnti}-lcid1.pcap", hfn=0, prev_cnt=-1, aux={})),
+			2: LteRlcNasReassembler(LCIDConfig(lcid=2, key="", eea=EEA.EEA0, bearer=2, bit_len=7, filename=f"rnti{rnti}-lcid2.pcap", hfn=0, prev_cnt=-1, aux={})),
+			3: LteRlcAmReassembler(LCIDConfig(lcid=3, key="", eea=EEA.EEA0, bearer=1, bit_len=12, filename=f"rnti{rnti}-lcid3.pcap", hfn=0, prev_cnt=-1, aux={})),
+			4: LteRlcAmReassembler(LCIDConfig(lcid=4, key="", eea=EEA.EEA0, bearer=2, bit_len=12, filename=f"rnti{rnti}-lcid4.pcap", hfn=0, prev_cnt=-1, aux={})),
+			5: LteRlcUm5BitReassembler(LCIDConfig(lcid=5, key="", eea=EEA.EEA0, bearer=3, bit_len=7, filename=f"rnti{rnti}-lcid5.pcap", hfn=0, prev_cnt=-1, aux={})),
 		}
 
 
@@ -255,8 +257,8 @@ class UE:
 		elif 'nas_eps_emm_toc' in fields:
 			self.parse_nas_security_mode_command(mac_lte)
 
-		elif 'lte_rrc_securitymodecommand_element' in fields:
-			replacements = self.parse_as_security_mode_command(mac_lte)
+		#elif 'lte_rrc_securitymodecommand_element' in fields:
+		#	replacements = self.parse_as_security_mode_command(mac_lte)
 
 		elif 'nas_eps_ciphered_msg' in fields:  #Ciphered message
 			replacements = self.parse_ciphered_nas(mac_lte, direction)
@@ -266,11 +268,11 @@ class UE:
 			log.print_tab('OTHER NAS-EPS')
 			log.print_tab('IGNORED!')
 
-		elif 'pdcp_lte_security_config' in fields:
-			if self.rrc_eea and self.rrc_eea != EEA.EEA0:
-				replacements = self.parse_ciphered_rrc(mac_lte, direction)
+		#elif 'pdcp_lte_security_config' in fields:
+		#	if self.rrc_eea and self.rrc_eea != EEA.EEA0:
+		#		replacements = self.parse_ciphered_rrc(mac_lte, direction)
 
-		elif 'sch_sdu' in fields and not any(['rlc' in field for field in fields]):
+		elif 'sch_sdu' in fields: #and not any(['rlc' in field for field in fields]):
 			self.parse_mac_lte(mac_lte)
 
 		else:
@@ -317,11 +319,14 @@ class UE:
 			keys = mgr.derive_all(session)
 
 			self.lcid[1].config.key = keys.k_rrc_enc
+			self.lcid[1].config.aux['k_nas_enc'] = keys.k_nas_enc
+			self.lcid[2].config.key = keys.k_rrc_enc
+			self.lcid[2].config.aux['k_nas_enc'] = keys.k_nas_enc
 			self.lcid[3].config.key = keys.k_up_enc
 			self.lcid[4].config.key = keys.k_up_enc
 			self.lcid[5].config.key = keys.k_up_enc
 
-			for i in (1, 3, 4, 5):
+			for i in range(1, 6):
 				self.lcid[i].config.eea = self.session.enc_alg_id
 
 			sqn = bytes(x ^ y for x, y in zip(session.sqn_xor_ak, keys.ak))

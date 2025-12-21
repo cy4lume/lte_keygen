@@ -186,6 +186,7 @@ class PCapTransfer():
 
 @unique
 class RNTIType(IntEnum):
+	P = 1
 	RA = 2
 	C = 3
 	SI = 4
@@ -279,15 +280,16 @@ class UE:
 		#log.print_tab('UP' if direction == 0 else 'DOWN')
 
 		replacements = None
-
+		
+		# print(fields)
 		if 'gsm_a_dtap_rand' in fields:
 			self.parse_auth_req(mac_lte)
 
 		elif 'nas_eps_emm_toc' in fields:
 			self.parse_nas_security_mode_command(mac_lte)
 
-		#elif 'lte_rrc_securitymodecommand_element' in fields:
-		#	replacements = self.parse_as_security_mode_command(mac_lte)
+		elif 'lte_rrc_securitymodecommand_element' in fields:
+			replacements = self.parse_as_security_mode_command(mac_lte)
 
 		elif 'nas_eps_ciphered_msg' in fields:  #Ciphered message
 			replacements = self.parse_ciphered_nas(mac_lte, direction)
@@ -767,8 +769,8 @@ def decode(
 
 			continue
 
-		# if 'rlc_lte_sequence_analysis_ok' in mac_lte.field_names:
-		# 	if getattr(mac_lte, 'rlc_lte_sequence_analysis_ok') == 'False':
+		# if 'rlc_lte_sequence_analysis_retx' in mac_lte.field_names:
+		# 	if getattr(mac_lte, 'rlc_lte_sequence_analysis_retx') == 'True':
 		# 		log.print('Ignoring Duplicate frame!', color=Color.BLUE)
 
 		# 		trans.skip()
@@ -820,7 +822,7 @@ def decode(
 		log.pop()
 
 	log.print()
-	return repeat
+	return False # repeat
 
 
 if __name__ == '__main__':

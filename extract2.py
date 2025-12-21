@@ -232,13 +232,42 @@ class UE:
 
 		# lcid context -> 1(rrcenc)/3(upenc).../4/5 UPenc / 1/3/4 -> AM->12bit 5->UM->7bit
 		self.lcid = {
-			1: LteRlcNasReassembler(LCIDConfig(lcid=1, key="", eea=EEA.EEA0, bearer=1, bit_len=7, filename=f"rnti{rnti}-lcid1.pcap", hfn=0, prev_cnt=-1, aux={})),
-			2: LteRlcNasReassembler(LCIDConfig(lcid=2, key="", eea=EEA.EEA0, bearer=2, bit_len=7, filename=f"rnti{rnti}-lcid2.pcap", hfn=0, prev_cnt=-1, aux={})),
-			3: LteRlcAmReassembler(LCIDConfig(lcid=3, key="", eea=EEA.EEA0, bearer=1, bit_len=12, filename=f"rnti{rnti}-lcid3.pcap", hfn=0, prev_cnt=-1, aux={})),
-			4: LteRlcAmReassembler(LCIDConfig(lcid=4, key="", eea=EEA.EEA0, bearer=2, bit_len=12, filename=f"rnti{rnti}-lcid4.pcap", hfn=0, prev_cnt=-1, aux={})),
-			5: LteRlcUm5BitReassembler(LCIDConfig(lcid=5, key="", eea=EEA.EEA0, bearer=3, bit_len=7, filename=f"rnti{rnti}-lcid5.pcap", hfn=0, prev_cnt=-1, aux={})),
+			1: LteRlcNasReassembler(LCIDConfig(lcid=1, key="", eea=EEA.EEA0, bearer=1, bit_len=7, filename=f"rnti{rnti}-lcid1.pcap", hfn=0, prev_cnt=-1, aux={"update_lcid": self.add_lcid})),
+			2: LteRlcNasReassembler(LCIDConfig(lcid=2, key="", eea=EEA.EEA0, bearer=2, bit_len=7, filename=f"rnti{rnti}-lcid2.pcap", hfn=0, prev_cnt=-1, aux={"update_lcid": self.add_lcid})),
+			#3: LteRlcAmReassembler(LCIDConfig(lcid=3, key="", eea=EEA.EEA0, bearer=1, bit_len=12, filename=f"rnti{rnti}-lcid3.pcap", hfn=0, prev_cnt=-1, aux={})),
+			#4: LteRlcAmReassembler(LCIDConfig(lcid=4, key="", eea=EEA.EEA0, bearer=2, bit_len=12, filename=f"rnti{rnti}-lcid4.pcap", hfn=0, prev_cnt=-1, aux={})),
+			#5: LteRlcUm5BitReassembler(LCIDConfig(lcid=5, key="", eea=EEA.EEA0, bearer=3, bit_len=7, filename=f"rnti{rnti}-lcid5.pcap", hfn=0, prev_cnt=-1, aux={})),
 		}
 
+	def add_lcid(self, drb):
+		match(drb["rlc_mode"]):
+			case "AM":
+				self.lcid[drb['lcid']] = LteRlcAmReassembler(
+					LCIDConfig(
+						lcid=drb['lcid'], key=self.keys.k_up_enc, eea=self.session.enc_alg_id,
+						bearer=drb['drb_id'], bit_len=drb['sn_length'],
+						filename=f"rnti{self.rnti}-lcid{drb['lcid']}.pcap", hfn=0, prev_cnt=-1, aux={}
+					)
+				)
+			case "UM":
+				if drb['sn_length'] == 5:
+					self.lcid[drb['lcid']] = LteRlcUm5BitReassembler(
+						LCIDConfig(
+							lcid=drb['lcid'], key=self.keys.k_up_enc, eea=self.session.enc_alg_id,
+							bearer=drb['drb_id'], bit_len=drb['sn_length'],
+							filename=f"rnti{self.rnti}-lcid{drb['lcid']}.pcap", hfn=0, prev_cnt=-1, aux={}
+						)
+					)
+				else:
+					self.lcid[drb['lcid']] = LteRlcAmReassembler(
+						LCIDConfig(
+							lcid=drb['lcid'], key=self.keys.k_up_enc, eea=self.session.enc_alg_id,
+							bearer=drb['drb_id'], bit_len=drb['sn_length'],
+							filename=f"rnti{self.rnti}-lcid{drb['lcid']}.pcap", hfn=0, prev_cnt=-1, aux={}
+						)
+					)
+			case _:
+				raise TypeError("Only AM/UM allowed")
 
 	def parse(self, frame):
 		number = int(frame.frame_info.number)
@@ -322,11 +351,8 @@ class UE:
 			self.lcid[1].config.aux['k_nas_enc'] = keys.k_nas_enc
 			self.lcid[2].config.key = keys.k_rrc_enc
 			self.lcid[2].config.aux['k_nas_enc'] = keys.k_nas_enc
-			self.lcid[3].config.key = keys.k_up_enc
-			self.lcid[4].config.key = keys.k_up_enc
-			self.lcid[5].config.key = keys.k_up_enc
 
-			for i in range(1, 6):
+			for i in range(1, 3):
 				self.lcid[i].config.eea = self.session.enc_alg_id
 
 			sqn = bytes(x ^ y for x, y in zip(session.sqn_xor_ak, keys.ak))

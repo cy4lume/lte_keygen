@@ -1009,7 +1009,9 @@ class LteRlcNasReassembler:
         data = process_nas_by_rrc(data, self.config.aux['k_nas_enc'], 1)
         print("Processed SDU!", data.hex())
 
-        print_added_drb_info(data)
+        drbs = print_added_drb_info(data)
+        for drb in drbs:
+            self.config.aux['update_lcid'](drb)
 
         self.pcap_writer.write_packet(data)
 

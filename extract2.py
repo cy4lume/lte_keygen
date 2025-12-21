@@ -767,13 +767,13 @@ def decode(
 
 			continue
 
-		if 'rlc_lte_sequence_analysis_ok' in mac_lte.field_names:
-			if getattr(mac_lte, 'rlc_lte_sequence_analysis_ok') == 'False':
-				log.print('Ignoring Duplicate frame!', color=Color.BLUE)
+		# if 'rlc_lte_sequence_analysis_ok' in mac_lte.field_names:
+		# 	if getattr(mac_lte, 'rlc_lte_sequence_analysis_ok') == 'False':
+		# 		log.print('Ignoring Duplicate frame!', color=Color.BLUE)
 
-				trans.skip()
+		# 		trans.skip()
 
-				continue
+		# 		continue
 
 		replacements = None
 		if rnti.type == RNTIType.C:
